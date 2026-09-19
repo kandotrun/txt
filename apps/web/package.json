@@ -1,0 +1,18 @@
+{
+  "name": "@txt/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "prosemirror-commands": "^1.7.2",
+    "prosemirror-history": "^1.5.0",
+    "prosemirror-keymap": "^1.2.3",
+    "prosemirror-model": "^1.25.11",
+    "prosemirror-state": "^1.4.4",
+    "prosemirror-transform": "^1.12.1",
+    "prosemirror-view": "^1.42.4"
+  }
+}

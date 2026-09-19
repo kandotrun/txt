@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["vitest/globals"]
+  },
+  "include": [
+    "packages/protocol/src/**/*.ts",
+    "apps/web/src/**/*.ts",
+    "apps/web/build.mjs",
+    "tests/protocol/**/*.ts",
+    "tests/editor/**/*.ts",
+    "tests/sync/**/*.ts",
+    "tests/e2e/**/*.ts",
+    "vitest.config.ts",
+    "playwright.config.ts"
+  ]
+}

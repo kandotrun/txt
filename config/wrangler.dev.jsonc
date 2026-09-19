@@ -1,0 +1,42 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "txt",
+  "main": "../apps/worker/src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "../apps/web/dist",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application"
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "triggers": {
+    "crons": ["23 * * * *"]
+  },
+  "vars": {
+    "APP_ORIGIN": "http://localhost:8799",
+    "WEBAUTHN_RP_ID": "localhost",
+    "WEBAUTHN_RP_NAME": "txt-dev",
+    "REGISTRATION_MODE": "open",
+    "ACCOUNT_LIMIT_BYTES": "10737418240",
+    "MEDIA_GRACE_MS": "86400000"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "txt",
+      "database_id": "TXT_D1_DATABASE_ID",
+      "migrations_dir": "../migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "txt-media"
+    }
+  ]
+}

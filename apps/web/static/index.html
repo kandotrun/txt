@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>txt</title>
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!--
+      Layout follows spec §4.2: no title bar, no sidebar, no toolbar. The only
+      permanent controls are 添付 (attach) and その他 (more), pinned to the
+      bottom edge above the safe area / software keyboard.
+    -->
+    <main id="app" hidden>
+      <div id="editor-host" class="editor" role="textbox" aria-multiline="true" aria-label="テキスト"></div>
+
+      <div id="attach-progress" class="attach-progress" hidden aria-live="polite"></div>
+
+      <footer class="controls" id="controls" hidden>
+        <button
+          id="attach-button"
+          class="icon-button"
+          type="button"
+          title="添付"
+          aria-label="添付"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path
+              d="M16.5 6.5 8.9 14.1a3 3 0 1 0 4.2 4.2l7.6-7.6a5 5 0 0 0-7.1-7.1L5.9 11.3a7 7 0 0 0 9.9 9.9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
+        <span id="sync-status" class="sync-status" role="status" aria-live="polite"></span>
+        <button
+          id="more-button"
+          class="icon-button"
+          type="button"
+          title="その他"
+          aria-label="その他"
+          aria-haspopup="menu"
+          aria-expanded="false"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <circle cx="5" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="12" cy="12" r="1.6" fill="currentColor" />
+            <circle cx="19" cy="12" r="1.6" fill="currentColor" />
+          </svg>
+        </button>
+      </footer>
+
+      <input
+        id="file-input"
+        class="visually-hidden"
+        type="file"
+        multiple
+        accept="image/jpeg,image/png,image/webp,image/gif,image/avif,image/heic,image/heif,video/mp4,video/webm,video/quicktime,audio/mpeg,audio/mp4,audio/aac,audio/wav,audio/ogg,audio/webm,audio/flac"
+      />
+    </main>
+
+    <!-- Gate screens: 未登録/未認証, 鍵なし, PRF未対応, ロック中など (§4.6) -->
+    <section id="gate" class="gate">
+      <div class="gate-card">
+        <h1 class="gate-title" id="gate-title">メールアドレスなしで、1枚のテキストを。</h1>
+        <p class="gate-body" id="gate-body">
+          パスキーで暗号化された、あなた専用の1枚です。本文と添付は端末で暗号化され、
+          サーバーには暗号文だけが保存されます。
+        </p>
+        <div class="gate-actions" id="gate-actions"></div>
+        <details class="gate-details" id="gate-details" hidden>
+          <summary>復旧キーで開く</summary>
+          <label class="field">
+            <span>復旧キー</span>
+            <textarea id="recovery-input" rows="3" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+          </label>
+          <button id="recovery-submit" class="button secondary" type="button">復旧キーを使う</button>
+        </details>
+        <p class="gate-footnote" id="gate-footnote"></p>
+      </div>
+    </section>
+
+    <!-- ダイアログ: 競合解決・セキュリティ設定・確認など (§4.6, §10.4) -->
+    <dialog id="dialog" class="dialog">
+      <h2 id="dialog-title" class="dialog-title"></h2>
+      <div id="dialog-body" class="dialog-body"></div>
+      <div id="dialog-actions" class="dialog-actions"></div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="/__APP_BUNDLE__"></script>
+    <!--
+      The crypto worker URL is injected at build time as a data attribute so no
+      inline script is needed (an inline script would violate the CSP, spec §14).
+    -->
+    <div id="txt-config" hidden data-crypto-worker="/__CRYPTO_WORKER__"></div>
+  </body>
+</html>

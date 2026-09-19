@@ -1,0 +1,10 @@
+{
+  "name": "@txt/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "txt cryptography protocol: Encode, key derivation, document model, test vectors",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

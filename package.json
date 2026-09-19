@@ -1,0 +1,36 @@
+{
+  "name": "txt",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "txt.2-38.com - a single E2EE text sheet with passkeys",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "typecheck:worker": "tsc -p tsconfig.worker.json --noEmit",
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit",
+    "typecheck": "npm run typecheck:worker && npm run typecheck:web",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
+    "test:protocol": "vitest run --config vitest.config.ts tests/protocol",
+    "build:web": "npm run build --workspace @txt/web",
+    "dev": "bash scripts/dev.sh",
+    "dev:db": "wrangler d1 migrations apply txt --local --persist-to .wrangler/dev-state --config config/wrangler.dev.jsonc",
+    "deploy": "npm run build:web && wrangler deploy",
+    "test:e2e": "playwright test",
+    "check": "npm run typecheck && npm run test:unit && npm run test:worker",
+    "dev:build": "npm run build:web && wrangler dev --config config/wrangler.dev.jsonc --port 8799 --persist-to .wrangler/dev-state"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^4.20250919.0",
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^22.20.4",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.135.0"
+  }
+}

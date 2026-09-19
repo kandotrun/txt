@@ -1,0 +1,11 @@
+# Local development values (wrangler dev). Never commit real values.
+APP_ORIGIN=http://localhost:8787
+WEBAUTHN_RP_ID=localhost
+WEBAUTHN_RP_NAME=txt-dev
+REGISTRATION_MODE=open
+ACCOUNT_LIMIT_BYTES=10737418240
+MEDIA_GRACE_MS=86400000
+# AASA stays disabled (404) until the real signed app values exist (spec §13).
+# TxtTeamId=
+# TxtIosBundleId=
+# TxtMacosBundleId=

@@ -1,0 +1,15 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`known-answer vectors > KEK / wrapped VaultKey are reproducible from fixed inputs 1`] = `"697492aa7f71c49ec181fc325a51cea686ec4e4d55f027303feffab16b09cd0c"`;
+
+exports[`known-answer vectors > document key and AAD are reproducible from fixed inputs 1`] = `"d4e2dc6ab63ded4bcafd073d39a8fcb8667ad031397a822903acb917b02a67b6"`;
+
+exports[`known-answer vectors > document key and AAD are reproducible from fixed inputs 2`] = `"0000000f7478742f76312f646f63756d656e74000000080000000000000001000000080000000000000001000000108cf3a2b1000040008000000000000001000000108cf3a2b1000040008000000000000002000000108cf3a2b1000040008000000000000003000000080000000000000012"`;
+
+exports[`known-answer vectors > draft key and AAD use separate purpose names 1`] = `"0000000c7478742f76312f6472616674000000108cf3a2b1000040008000000000000001000000108cf3a2b1000040008000000000000002000000057461622d31000000080000000000000001"`;
+
+exports[`known-answer vectors > media chunk nonce and AAD match the container definition 1`] = `"000000127478742f76312f6d656469612d6368756e6b000000080000000000000001000000108cf3a2b1000040008000000000000001000000108cf3a2b1000040008000000000000002000000108cf3a2b1000040008000000000000005000000080000000000000000000000080000000000000064000000080000000000000064"`;
+
+exports[`known-answer vectors > recovery key derives auth/KEK and round-trips its text form 1`] = `"9eba7b9d1fe0c5078b6e65ca74b2c7259efe40eca91b12727b5fc78948422ba7"`;
+
+exports[`known-answer vectors > recovery key derives auth/KEK and round-trips its text form 2`] = `"04ed913c45fd73efbaa768a3a029cd30d0b32664d6b21d1898da511dcbb97920"`;
