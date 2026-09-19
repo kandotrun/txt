@@ -30,6 +30,32 @@ async function waitForSync(page: import("@playwright/test").Page): Promise<void>
 // authenticators must never leak between cases.
 test.describe.configure({ mode: "serial" });
 
+test("shows the unlock gate on first paint without the editor shell", async ({ page }) => {
+  await page.goto(BASE);
+
+  // The unlock gate must be the first thing a visitor sees, fully inside the
+  // viewport. A `display: flex` rule must never resurrect a `hidden` element:
+  // when it did, the empty editor shell and its controls covered the viewport
+  // and pushed the gate a full screen below the fold.
+  const startButton = page.getByRole("button", { name: "はじめて使う" });
+  await expect(startButton).toBeVisible();
+  const insideViewport = await startButton.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.top >= 0 && rect.bottom <= window.innerHeight;
+  });
+  expect(insideViewport).toBe(true);
+
+  // Neither the editor shell nor its controls may be rendered before unlock.
+  await expect(page.locator("#app")).toBeHidden();
+  await expect(page.locator("#controls")).toBeHidden();
+  await expect(page.locator("#editor-host")).toBeHidden();
+  await expect(page.locator("#attach-progress")).toBeHidden();
+
+  const scrollHeight = await page.evaluate(() => document.body.scrollHeight);
+  const viewportHeight = await page.evaluate(() => window.innerHeight);
+  expect(scrollHeight).toBeLessThanOrEqual(viewportHeight + 1);
+});
+
 test("registers with a passkey, edits, and syncs", async ({ page }) => {
   const { client, authenticatorId } = await installVirtualAuthenticator(page, { hasPrf: true });
   const consoleErrors: string[] = [];

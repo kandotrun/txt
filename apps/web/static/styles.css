@@ -43,6 +43,17 @@
   box-sizing: border-box;
 }
 
+/*
+ * A `hidden` element must never be rendered. Several rules below set
+ * `display: flex` on #app/#gate/#controls; an ID selector beats the browser's
+ * default `[hidden] { display: none }`, which left the editor shell and its
+ * controls on screen while the unlock gate was pushed a full screen below the
+ * fold. `!important` keeps the attribute authoritative everywhere.
+ */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
