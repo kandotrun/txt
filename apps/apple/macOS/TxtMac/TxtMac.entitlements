@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Associated Domains (spec §13): the app shares the RP ID with the Web
+		client so a passkey created in Safari is usable here and vice versa.
+		The AASA file served by the Worker declares the same team/bundle pair.
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:txt.2-38.com</string>
+	</array>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- The app reads only the media the user picks via the standard importer. -->
+	<key>com.apple.security.files.user-selected.read-only</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
