@@ -177,45 +177,48 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var gatePrimaryLabel: String {
+    /// Gate actions come from the shared table in TxtCore (spec §4.6) so both
+    /// apps and any future one behave identically. The rules are unit-tested;
+    /// see GatePresentationTests.
+    private var gateState: GatePresentation.State {
         switch phase {
-        case .gate(.needsUnlock), .gate(.completingRegistration): "パスキーで開く"
-        default: "パスキーを作成して始める"
+        case .loading: .loading
+        case .gate(.firstVisit): .firstVisit
+        case .gate(.needsUnlock): .needsUnlock
+        case .gate(.completingRegistration): .completingRegistration
+        case .gate(.error): .error
+        case .editing: .loading
         }
     }
+
+    var gatePrimaryLabel: String { GatePresentation.actions(for: gateState).primary }
 
     var gateBusy: Bool {
         if case .loading = phase { return true }
         return false
     }
 
-    var gateShowsRecovery: Bool {
-        switch phase {
-        case .gate(.needsUnlock), .gate(.completingRegistration), .gate(.error): true
-        default: false
-        }
-    }
+    var gateShowsRecovery: Bool { GatePresentation.actions(for: gateState).showsRecovery }
 
-    var gateShowsRegister: Bool {
-        switch phase {
-        case .gate(.needsUnlock), .gate(.error): true
-        default: false
-        }
-    }
+    var gateShowsRegister: Bool { GatePresentation.actions(for: gateState).showsRegister }
 
     var isUnlocked: Bool { vaultKey != nil }
 
     func performGatePrimary() {
+        let actions = GatePresentation.actions(for: gateState)
+        guard !actions.primary.isEmpty else { return }
         Task {
-            switch phase {
-            case .gate(.firstVisit), .gate(.error):
-                await register()
-            default:
+            if actions.primaryUnlocks {
+                // The primary action never creates an account: a second account
+                // is a deliberate choice made through "はじめて使う" (spec §4.6).
                 await unlock()
+            } else {
+                await register()
             }
         }
     }
 
+    /// Explicit "はじめて使う" — the only path that creates a new account.
     func registerNewAccount() {
         Task { await register() }
     }

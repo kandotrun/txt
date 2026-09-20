@@ -84,6 +84,10 @@ public struct ApiClient: Sendable {
         public var error: Inner
     }
 
+    /// Native client identifier (spec §5.4). Both platform apps send the same
+    /// prefix the Worker matches on.
+    public static let userAgent = "txt-native/0.1 (txt-macos; txt-ios)"
+
     public var origin: URL
     public var tokenProvider: @Sendable () -> String?
     private let session: URLSession
@@ -92,6 +96,11 @@ public struct ApiClient: Sendable {
         self.origin = origin
         self.tokenProvider = tokenProvider
         let configuration = URLSessionConfiguration.ephemeral
+        // Identify as a native client: the Worker decides client_kind from the
+        // User-Agent, and only a native client receives a Bearer token instead
+        // of a cookie (spec §5.4). Without this the app authenticates as "web"
+        // and never gets a usable session.
+        configuration.httpAdditionalHeaders = ["User-Agent": ApiClient.userAgent]
         configuration.waitsForConnectivity = true
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 600
@@ -115,6 +124,7 @@ public struct ApiClient: Sendable {
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let token = tokenProvider() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -433,6 +443,7 @@ public struct ApiClient: Sendable {
             throw TxtError.network("bad document path")
         }
         var request = URLRequest(url: url)
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let token = tokenProvider() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -544,6 +555,7 @@ public struct ApiClient: Sendable {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "PUT"
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let token = tokenProvider() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -584,6 +596,7 @@ public struct ApiClient: Sendable {
             throw TxtError.network("bad cipher path")
         }
         var request = URLRequest(url: url)
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let token = tokenProvider() {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }

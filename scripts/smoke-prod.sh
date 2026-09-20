@@ -79,8 +79,20 @@ check_contains "prf extension requested" '"prf"' "$OPTIONS"
 echo "- local-only surfaces"
 LOCAL_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${BASE}/_local/media/x")"
 check "_local is not served directly" "404" "$LOCAL_STATUS"
+# AASA is served once the real Team ID / bundle IDs are configured (spec §13).
+# Before that it deliberately 404s; after it must be a 200 JSON document that
+# names the signed apps, because passkey sharing depends on it.
+AASA_BODY="$(curl -s --max-time 15 "${BASE}/.well-known/apple-app-site-association")"
 AASA_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${BASE}/.well-known/apple-app-site-association")"
-check "AASA disabled until real values" "404" "$AASA_STATUS"
+if [ "$AASA_STATUS" = "404" ]; then
+  check "AASA withheld until real values" "404" "$AASA_STATUS"
+else
+  check "AASA is published" "200" "$AASA_STATUS"
+  case "$AASA_BODY" in
+    *'"webcredentials"'*'.txt.ios"'*'.txt.mac"'*) check "AASA names the iOS and macOS apps" "ok" "ok" ;;
+    *) check "AASA names the iOS and macOS apps" "ok" "missing" ;;
+  esac
+fi
 SPA_STATUS="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${BASE}/api/v1/does-not-exist")"
 check "API 404 (no SPA fallback)" "404" "$SPA_STATUS"
 SPA_BODY="$(curl -s --max-time 15 "${BASE}/api/v1/does-not-exist")"

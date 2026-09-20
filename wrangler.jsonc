@@ -23,7 +23,10 @@
     "WEBAUTHN_RP_NAME": "txt",
     "REGISTRATION_MODE": "open",
     "ACCOUNT_LIMIT_BYTES": "10737418240",
-    "MEDIA_GRACE_MS": "86400000"
+    "MEDIA_GRACE_MS": "86400000",
+    "TxtTeamId": "UGNVGWZMAU",
+    "TxtIosBundleId": "com.2-38.txt.ios",
+    "TxtMacosBundleId": "com.2-38.txt.mac"
   },
   "d1_databases": [
     {
