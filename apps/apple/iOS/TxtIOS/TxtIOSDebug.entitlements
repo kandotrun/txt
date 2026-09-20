@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Debug builds bypass Apple's AASA CDN with `?mode=developer`, because the
+		CDN caches the file for up to 24 hours and will still hold the 404 it
+		fetched before the association was published. Requires the device-side
+		toggle: Settings → Developer → Associated Domains Development.
+
+		Release builds use the plain entitlement (see TxtIOS.entitlements) and
+		read the CDN like every shipped app.
+	-->
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>webcredentials:txt.2-38.com?mode=developer</string>
+	</array>
+</dict>
+</plist>

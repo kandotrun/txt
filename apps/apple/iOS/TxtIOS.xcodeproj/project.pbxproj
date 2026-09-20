@@ -234,7 +234,7 @@
 		B100000D000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = TxtIOS/TxtIOS.entitlements;
+				CODE_SIGN_ENTITLEMENTS = TxtIOS/TxtIOSDebug.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = UGNVGWZMAU;

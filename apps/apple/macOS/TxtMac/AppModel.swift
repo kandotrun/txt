@@ -173,7 +173,10 @@ final class AppModel: ObservableObject {
             "パスキーで暗号化された、あなた専用の1枚です。本文と添付は端末で暗号化され、サーバーには暗号文だけが保存されます。"
         case .gate(.needsUnlock(let reason)): reason
         case .gate(.completingRegistration): "パスキーは作成済みですが、準備が完了していません。"
-        case .gate(.error(let message)): "\(message)。データは変更していません。"
+        case .gate(.error(let message)):
+            // Do not double the terminator: mapped errors can already end with
+            // one (English system text ends with ".", Japanese with "。").
+            "\(Self.terminated(message)) データは変更していません。"
         case .editing: ""
         }
     }
@@ -563,6 +566,14 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// Ensures a sentence ends exactly once.
+    static func terminated(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.last else { return trimmed }
+        if "。．.!?！？".contains(last) { return trimmed }
+        return trimmed + "。"
+    }
 
     static func describe(_ error: Error) -> String {
         if let passkey = error as? PasskeyClient.PasskeyError {

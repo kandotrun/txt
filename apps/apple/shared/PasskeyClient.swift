@@ -20,12 +20,19 @@ final class PasskeyClient: NSObject, PasskeyCeremonies, @unchecked Sendable {
         case cancelled
         case noPrf
         case failed(String)
+        /// The app and txt.2-38.com are not linked yet (AASA not propagated).
+        case associationPending
 
         var errorDescription: String? {
             switch self {
-            case .cancelled: "操作がキャンセルされました。"
-            case .noPrf: "この環境では、このパスキーで暗号化された内容を開けません。"
-            case .failed(let message): message
+            case .cancelled:
+                "操作がキャンセルされました。"
+            case .noPrf:
+                "この環境では、このパスキーで暗号化された内容を開けません。"
+            case .failed(let message):
+                message
+            case .associationPending:
+                "このアプリとWebサイトの連携がまだ有効になっていません。数分待ってから、もう一度お試しください。"
             }
         }
     }
@@ -134,6 +141,32 @@ final class PasskeyClient: NSObject, PasskeyCeremonies, @unchecked Sendable {
         SessionTokenStore.store(token: token)
     }
 
+    /// Turns a ceremony failure into something a person can act on.
+    ///
+    /// System errors arrive in English and name bundle IDs and domains
+    /// ("Unable to verify webcredentials association of TEAM.bundle with domain
+    /// …"), which tells a user nothing. The association case is actionable —
+    /// the app and the site are not linked yet, or the link has not propagated
+    /// — so it gets its own message; everything else keeps the system text so a
+    /// real diagnostic is never hidden.
+    static func mapCeremonyError(_ error: Error) -> Error {
+        if let asError = error as? ASAuthorizationError {
+            switch asError.code {
+            case .canceled:
+                return PasskeyError.cancelled
+            case .failed:
+                let text = asError.localizedDescription
+                if text.contains("webcredentials association") || text.contains("associated domain") {
+                    return PasskeyError.associationPending
+                }
+                return PasskeyError.failed(text)
+            default:
+                return PasskeyError.failed(asError.localizedDescription)
+            }
+        }
+        return PasskeyError.failed(error.localizedDescription)
+    }
+
     /// Extracts raw bytes from a `SymmetricKey` PRF output.
     private static func symmetricKeyBytes(_ key: SymmetricKey?) -> [UInt8]? {
         guard let key else { return nil }
@@ -169,13 +202,7 @@ extension PasskeyClient: ASAuthorizationControllerDelegate {
         didCompleteWithError error: Error
     ) {
         Task { @MainActor in
-            let mapped: Error
-            if let asError = error as? ASAuthorizationError, asError.code == .canceled {
-                mapped = PasskeyError.cancelled
-            } else {
-                mapped = PasskeyError.failed(error.localizedDescription)
-            }
-            continuation?.resume(throwing: mapped)
+            continuation?.resume(throwing: Self.mapCeremonyError(error))
             continuation = nil
         }
     }
