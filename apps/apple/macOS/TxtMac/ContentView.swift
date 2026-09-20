@@ -17,12 +17,15 @@ struct ContentView: View {
             mediaProvider: { model.mediaInfo($0) },
             onDocumentChange: { model.documentChanged($0) },
             onComposingChange: { model.composingChanged($0) },
-            onFilesDropped: { urls, _ in model.attachFiles(urls, at: nil) }
+            onFilesDropped: { urls, _ in model.attachFiles(urls, at: nil) },
+            onInsertionPointChanged: { model.editorInsertionPoint = $0 }
         )
         .frame(minWidth: 400, minHeight: 320)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
+                    // Capture the caret before the panel takes focus (spec §11.3).
+                    model.captureInsertionPoint()
                     model.isImporterPresented = true
                 } label: {
                     Label("添付", systemImage: "paperclip")

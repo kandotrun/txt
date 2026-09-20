@@ -18,6 +18,7 @@ struct TxtIOSApp: App {
     }
 }
 
+/// Chooses between the gate and the editing surface (spec §4.3, §4.6).
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -32,7 +33,8 @@ struct RootView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar(.hidden, for: .navigationBar)
+            // The navigation bar stays visible: the toolbar (添付 / その他) lives
+            // on it, and hiding it removed the only way to attach a file.
         }
     }
 }

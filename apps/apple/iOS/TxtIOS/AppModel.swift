@@ -434,7 +434,7 @@ final class AppModel: ObservableObject {
             attachProgress[key] = 0
             defer { attachProgress[key] = nil }
             do {
-                let mediaId = try await MediaUploader.upload(
+                let uploaded = try await MediaUploader.upload(
                     url: url,
                     documentId: documentId ?? "",
                     api: api,
@@ -443,13 +443,15 @@ final class AppModel: ObservableObject {
                         Task { @MainActor in self?.attachProgress[key] = fraction }
                     }
                 )
-                // A pending attachment lands at the caret when the editor knows
-                // it, otherwise at the end (spec §11.3).
-                let next = EditorBridge.insertMediaAtBoundary(
+                // The block and the dictionary entry must be written together: a
+                // block that references a mediaId with no entry is invalid, and
+                // the save is refused (spec §8).
+                var next = EditorBridge.insertMediaAtBoundary(
                     document,
-                    mediaId: mediaId,
+                    mediaId: uploaded.mediaId,
                     position: pendingInsertionIndex ?? max(0, document.blocks.count - 1)
                 )
+                next.media[uploaded.mediaId] = uploaded.info
                 pendingInsertionIndex = nil
                 documentChanged(next)
             } catch {

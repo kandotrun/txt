@@ -529,8 +529,31 @@ public struct ApiClient: Sendable {
         public var replayed: Bool
     }
 
-    public func startUpload(_ payload: [String: Any]) async throws -> StartUploadResult {
-        try await request("/api/v1/media/uploads", method: "POST", json: payload, decode: StartUploadResult.self)
+    /// Start-upload request (spec §11.2). Typed so a missing field cannot ship:
+    /// the Worker rejects a request without `clientUploadId`, `cryptoFormat` or
+    /// `chunkBytes`, and `chunkBytes` is the **ciphertext** chunk size.
+    public struct StartUploadPayload: Sendable, Encodable {
+        public var clientUploadId: String
+        public var cipherBytes: Int
+        public var cryptoFormat: Int
+        public var chunkBytes: Int
+
+        public init(clientUploadId: String, cipherBytes: Int, cryptoFormat: Int, chunkBytes: Int) {
+            self.clientUploadId = clientUploadId
+            self.cipherBytes = cipherBytes
+            self.cryptoFormat = cryptoFormat
+            self.chunkBytes = chunkBytes
+        }
+    }
+
+    public func startUpload(_ payload: StartUploadPayload) async throws -> StartUploadResult {
+        let body = try JSONEncoder().encode(payload)
+        return try await requestBody(
+            "/api/v1/media/uploads",
+            method: "POST",
+            body: body,
+            decode: StartUploadResult.self
+        )
     }
 
     public struct UploadStatus: Sendable, Decodable {

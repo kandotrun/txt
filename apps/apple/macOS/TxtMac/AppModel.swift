@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
     @Published var isPasskeySheetPresented = false
     @Published private(set) var pendingRecoveryKey = ""
     @Published private(set) var attachProgress: [String: Double] = [:]
+    /// Block index captured when the attach button is pressed (spec §11.3).
+    var pendingInsertionIndex: Int?
 
     let allowedContentTypes: [UTType] = [
         .image, .movie, .video, .audio, .mpeg4Movie, .quickTimeMovie, .mp3, .wav, .aiff,
@@ -451,8 +453,18 @@ final class AppModel: ObservableObject {
 
     func attachFiles(_ urls: [URL], at position: Int?) {
         guard isUnlocked else { return }
-        Task { await attach(urls, at: position) }
+        Task { await attach(urls, at: position ?? pendingInsertionIndex) }
     }
+
+    /// Remembers where the caret is before the file panel takes focus: the panel
+    /// can reset the selection, so the position must be captured first
+    /// (spec §11.3).
+    func captureInsertionPoint() {
+        pendingInsertionIndex = editorInsertionPoint?()
+    }
+
+    /// Set by the view to report the editor's current caret position.
+    var editorInsertionPoint: (() -> Int)?
 
     private func attach(_ urls: [URL], at position: Int?) async {
         for url in urls {
@@ -460,7 +472,7 @@ final class AppModel: ObservableObject {
             attachProgress[key] = 0
             defer { attachProgress[key] = nil }
             do {
-                let mediaId = try await MediaUploader.upload(
+                let uploaded = try await MediaUploader.upload(
                     url: url,
                     documentId: documentId ?? "",
                     api: api,
@@ -469,8 +481,16 @@ final class AppModel: ObservableObject {
                         Task { @MainActor in self?.attachProgress[key] = fraction }
                     }
                 )
-                let index = position ?? max(0, document.blocks.count - 1)
-                let next = EditorBridge.insertMediaAtBoundary(document, mediaId: mediaId, position: index)
+                // The block and the dictionary entry must be written together: a
+                // block that references a mediaId with no entry is invalid, and
+                // the save is refused (spec §8).
+                var next = EditorBridge.insertMediaAtBoundary(
+                    document,
+                    mediaId: uploaded.mediaId,
+                    position: position ?? max(0, document.blocks.count - 1)
+                )
+                next.media[uploaded.mediaId] = uploaded.info
+                pendingInsertionIndex = nil
                 documentChanged(next)
             } catch {
                 setStatus("添付に失敗しました: \(Self.describe(error))")

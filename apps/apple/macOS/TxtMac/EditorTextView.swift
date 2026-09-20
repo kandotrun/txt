@@ -22,6 +22,10 @@ struct EditorTextView: NSViewRepresentable {
     let onDocumentChange: (DocumentModel) -> Void
     let onComposingChange: (Bool) -> Void
     let onFilesDropped: ([URL], Int) -> Void
+    /// Reports the caret's block index so an attachment can be inserted at the
+    /// caret (spec §11.3). The view calls this with a closure that reads the
+    /// editor's current position on demand.
+    let onInsertionPointChanged: (@escaping () -> Int) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -50,6 +54,10 @@ struct EditorTextView: NSViewRepresentable {
         // storage paragraphs back onto them, preserving identity where it can.
         context.coordinator.textView = textView
         context.coordinator.load(document)
+        // Give the model a way to read the caret on demand.
+        onInsertionPointChanged { [weak coordinator = context.coordinator] in
+            coordinator?.insertionBlockIndex() ?? 0
+        }
         return scrollView
     }
 
@@ -138,6 +146,17 @@ struct EditorTextView: NSViewRepresentable {
         }
 
         // MARK: - Reading storage back into the model
+
+        /// The block index containing the caret, for attachment insertion.
+        func insertionBlockIndex() -> Int {
+            guard let textView else { return 0 }
+            let location = textView.selectedRange().location
+            let text = textView.string as NSString
+            let prefix = text.substring(to: min(location, text.length))
+            // One block per paragraph, so the caret's block is the number of
+            // newlines before it.
+            return prefix.components(separatedBy: "\n").count - 1
+        }
 
         /// Serializes storage into the shared model, preserving block IDs where
         /// the paragraph count allows it (spec §8: normal edits never regenerate
