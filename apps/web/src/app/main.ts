@@ -6,11 +6,18 @@
  */
 
 import { serializeDocument } from "../../../../packages/protocol/src/document.ts";
+import { IDLE_LOCK_MS } from "../../../../packages/protocol/src/windows.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api, ApiRequestError } from "./api.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
+import {
+  forgetAllKeptVaultKeys,
+  forgetKeptVaultKey,
+  loadKeptVaultKey,
+  keepVaultKey,
+} from "./device-keep.ts";
 import { Editor } from "./editor.ts";
 import { BLOB_FALLBACK_MAX_BYTES, classify, fetchDecrypted, uploadFile } from "./media.ts";
 import type { MediaRejectedError } from "./media.ts";
@@ -25,7 +32,7 @@ import {
   RECOVERY_HELP,
 } from "./vault.ts";
 import type { UnlockedVault } from "./vault.ts";
-import { WebAuthnError } from "./webauthn.ts";
+import { WebAuthnError, assertCredential } from "./webauthn.ts";
 
 /* ------------------------------------------------------------------ */
 /* Element handles                                                     */
@@ -106,7 +113,7 @@ const state: AppState = {
   objectUrls: new Map(),
 };
 
-const LOCK_AFTER_MS = 5 * 60 * 1000;
+const LOCK_AFTER_MS = IDLE_LOCK_MS;
 
 /* ------------------------------------------------------------------ */
 /* Gate rendering (spec §4.6)                                          */
@@ -172,6 +179,13 @@ interface DialogAction {
   value: string;
 }
 
+/**
+ * Identifies the currently-shown dialog. A `<dialog>` element fires `close`
+ * asynchronously, so a stale event from a just-answered dialog must not resolve
+ * the next one (the "その他" menu is immediately followed by a confirmation).
+ */
+let dialogToken = 0;
+
 function showDialog(options: {
   title: string;
   body: HTMLElement | string;
@@ -179,15 +193,29 @@ function showDialog(options: {
 }): Promise<string> {
   return new Promise((resolve) => {
     let settled = false;
+    /**
+     * A `<dialog>` fires `close` asynchronously. When one dialog is answered
+     * and another opens immediately after (the "その他" menu followed by a
+     * confirmation), that late event would resolve the *new* dialog with the
+     * previous answer. Capture the element we opened and ignore any `close`
+     * that arrives once a newer dialog has been shown.
+     */
+    const dialog = elements.dialog;
+    const openToken = ++dialogToken;
     const settle = (value: string): void => {
       if (settled) return;
       settled = true;
-      elements.dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("close", onClose);
       resolve(value);
     };
     const onClose = (): void => {
-      const value = elements.dialog.returnValue || "dismissed";
-      elements.dialog.returnValue = "";
+      // A `close` event fires asynchronously. When the next dialog has already
+      // been shown on the same element, this event belongs to the previous one
+      // and must be ignored — `dialog.open` is the reliable discriminator,
+      // because a genuine user dismissal leaves it closed.
+      if (openToken !== dialogToken || settled || dialog.open) return;
+      const value = dialog.returnValue || "dismissed";
+      dialog.returnValue = "";
       settle(value);
     };
 
@@ -208,13 +236,17 @@ function showDialog(options: {
           // Resolve directly on the click: relying solely on the <dialog>
           // close event is fragile when the browser suppresses it.
           settle(action.value);
-          if (elements.dialog.open) elements.dialog.close();
+          if (dialog.open) dialog.close();
         });
         return button;
       }),
     );
-    elements.dialog.addEventListener("close", onClose);
-    if (!elements.dialog.open) elements.dialog.showModal();
+    dialog.addEventListener("close", onClose);
+    // Clear any leftover value *before* opening: a `close` event from the
+    // previous dialog can arrive after this one is shown, and reading a stale
+    // `returnValue` would answer the new dialog with the old answer.
+    dialog.returnValue = "";
+    if (!dialog.open) dialog.showModal();
   });
 }
 
@@ -457,6 +489,24 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     });
     if (window.__txtDebug) window.__txtDebug.step = "session:unlocked";
 
+    // Keep the vault on this device so the next visit does not require a passkey
+    // ceremony (spec §6.4). The wrapped key is re-derived per document, so a
+    // failure here never blocks the session that is already unlocked.
+    try {
+      const expiresAt = await keepVaultKey({
+        accountId: vault.accountId,
+        documentId: state.documentId,
+        keyVersion: first.data.keyVersion,
+        vaultKey: vault.vaultKey,
+      });
+      if (window.__txtDebug) {
+        window.__txtDebug.step = `session:kept-until-${new Date(expiresAt).toISOString()}`;
+      }
+    } catch {
+      // Storage unavailable (private mode, quota): the session works, it just
+      // requires the passkey again next time.
+    }
+
     const document = await bridge.decryptDocument({
       mutationId: first.data.mutationId,
       encryptedRevision: first.data.encryptedRevision,
@@ -562,7 +612,9 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   state.sync = sync;
   sync.start();
 
-  // Local draft recovery (§9.6, §10.6): only committed snapshots are applied.
+  // Local draft recovery (§9.6, §10.6): a draft is only meaningful when it
+  // holds input the server does not have yet. Committed snapshots are dropped
+  // once saved, so anything left here is either unsynced or provisional.
   const draft = await loadDraft({
     vaultKey: vault.vaultKey,
     accountId: vault.accountId,
@@ -571,7 +623,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   });
   if (draft && draft.mutationId) {
     const decision = await showDialog({
-      title: "未確定の入力が残っています",
+      title: draft.provisional ? "未確定の入力が残っています" : "未同期の入力が残っています",
       body: "前回の続きがあります。採用しますか。",
       actions: [
         { label: "採用する", value: "accept", primary: true },
@@ -699,6 +751,20 @@ function lockVault(reason: string): void {
     ],
     showRecovery: true,
   });
+}
+
+/**
+ * Explicit lock: drop the in-memory key AND the device-kept copy so the next
+ * visit really requires a passkey (spec §6.4). Unlike the idle lock, this is a
+ * deliberate user action, so nothing is retained.
+ */
+function lockVaultForget(): void {
+  const accountId = state.unlocked?.accountId;
+  if (accountId) {
+    void forgetKeptVaultKey(accountId).catch(() => undefined);
+  }
+  lockVault("ロックしました。");
+  toast("ロックしました。次回はパスキーが必要です。");
 }
 
 /* ------------------------------------------------------------------ */
@@ -836,23 +902,69 @@ async function recoveryFlow(): Promise<void> {
   }
 }
 
+/**
+ * Re-authenticates the current session for a sensitive operation (spec §5.4).
+ * The ceremony is the same passkey the user already holds; it only refreshes
+ * the step-up window on the server session.
+ */
+async function performStepUp(): Promise<void> {
+  const { options } = await api.stepupOptions();
+  const assertion = await assertCredential(options);
+  await api.stepupVerify(assertion.dto);
+}
+
 /* ------------------------------------------------------------------ */
 /* "その他" menu (spec §4.6)                                           */
 /* ------------------------------------------------------------------ */
 
 async function showMoreMenu(): Promise<void> {
+  const accountId = state.unlocked?.accountId;
+  const kept = accountId ? await loadKeptVaultKey(accountId).catch(() => null) : null;
+  const keepLabel = kept ? "この端末の保持を解除" : "この端末に保持（30日）";
   const decision = await showDialog({
     title: "その他",
-    body: "この1枚に関する操作です。",
+    body: kept
+      ? `この端末ではパスキーなしで開けます（${new Date(kept.expiresAt).toLocaleDateString("ja-JP")} まで）。`
+      : "この1枚に関する操作です。",
     actions: [
-      { label: "パスキーを追加", value: "add-passkey", primary: true },
+      { label: keepLabel, value: kept ? "forget-device" : "keep-device", primary: true },
+      { label: "パスキーを追加", value: "add-passkey" },
       { label: "復旧キーを更新", value: "rotate-recovery" },
+      { label: "今すぐロック", value: "lock-now" },
       { label: "セッションを終了", value: "end-session" },
       { label: "アカウントを削除", value: "delete-account" },
     ],
   });
   if (!state.unlocked) return;
   switch (decision) {
+    case "keep-device": {
+      if (!state.documentId) break;
+      try {
+        const expiresAt = await keepVaultKey({
+          accountId: state.unlocked.accountId,
+          documentId: state.documentId,
+          keyVersion: state.unlocked.keyVersion,
+          vaultKey: state.unlocked.vaultKey,
+        });
+        toast(
+          `この端末に保持しました（${new Date(expiresAt).toLocaleDateString("ja-JP")} まで）。`,
+        );
+      } catch (error) {
+        toast(`保持できませんでした: ${(error as Error).message}`);
+      }
+      break;
+    }
+    case "forget-device":
+      try {
+        await forgetKeptVaultKey(state.unlocked.accountId);
+        toast("この端末の保持を解除しました。次回はパスキーが必要です。");
+      } catch (error) {
+        toast((error as Error).message);
+      }
+      break;
+    case "lock-now":
+      lockVaultForget();
+      break;
     case "add-passkey":
       try {
         await addPasskey({
@@ -879,7 +991,10 @@ async function showMoreMenu(): Promise<void> {
     }
     case "end-session":
       await api.endSession().catch(() => undefined);
-      if (state.unlocked) await clearAccountDrafts(state.unlocked.accountId);
+      if (state.unlocked) {
+        await clearAccountDrafts(state.unlocked.accountId);
+        await forgetKeptVaultKey(state.unlocked.accountId).catch(() => undefined);
+      }
       state.unlocked = null;
       state.bridge?.lock();
       state.bridge = null;
@@ -896,8 +1011,13 @@ async function showMoreMenu(): Promise<void> {
       });
       if (confirmed === "confirm") {
         try {
+          // Deletion is a sensitive operation: the server requires a step-up
+          // re-authentication within 5 minutes (spec §5.4). Perform it here so
+          // the user is not left with a 403 they cannot resolve.
+          await performStepUp();
           await api.deleteAccount(crypto.randomUUID());
           await clearAccountDrafts(state.unlocked.accountId);
+          await forgetAllKeptVaultKeys().catch(() => undefined);
           window.location.reload();
         } catch (error) {
           toast((error as Error).message);
@@ -942,6 +1062,28 @@ document.addEventListener("visibilitychange", () => {
 async function boot(): Promise<void> {
   try {
     const session = await api.session();
+
+    // With a valid session, try the device-kept VaultKey first: this is what
+    // makes a return visit open without a passkey ceremony (spec §6.4).
+    if (session.scope === "active") {
+      const kept = await loadKeptVaultKey(session.accountId).catch(() => null);
+      if (kept) {
+        try {
+          await startSession({
+            vaultKey: kept.vaultKey,
+            accountId: session.accountId,
+            credentialId: "",
+            keyVersion: kept.keyVersion,
+          });
+          return;
+        } catch {
+          // The kept key no longer opens the document (rotation, other device):
+          // fall through to the explicit unlock gate.
+          await forgetKeptVaultKey(session.accountId).catch(() => undefined);
+        }
+      }
+    }
+
     if (session.scope === "pending") {
       // A half-finished registration: offer to complete it.
       showGate({
@@ -955,7 +1097,7 @@ async function boot(): Promise<void> {
       });
       return;
     }
-    // A valid session still needs an explicit unlock for the decryption key.
+    // A valid session without a device-kept key still needs an explicit unlock.
     showGate({
       title: "パスキーで開く",
       body: "暗号化された内容を開くため、パスキーを確認します。",

@@ -19,7 +19,7 @@ import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src
 import { ApiRequestError, api } from "./api.ts";
 import type { DocumentResponse } from "./api.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
-import { saveDraft } from "./drafts.ts";
+import { saveDraft, clearDraft } from "./drafts.ts";
 
 export type SyncState =
   | "idle"
@@ -46,12 +46,24 @@ export interface SyncCallbacks {
   onMediaManifestChanged?: () => void;
 }
 
-const DEBOUNCE_MS = 700;
-const MAX_WAIT_MS = 5000;
-const ACTIVE_POLL_MS = 5000;
-const IDLE_POLL_MS = 30000;
+/**
+ * Sync timings (spec §10.2).
+ *
+ * Tuned for a seamless feel: a short debounce after the last committed input,
+ * a tighter continuous-typing ceiling, and a fast foreground poll. All of them
+ * still defer to the IME safe point, which is what keeps input correct — the
+ * numbers below trade a little more traffic for noticeably lower latency.
+ */
+const DEBOUNCE_MS = 300;
+const MAX_WAIT_MS = 2000;
+const ACTIVE_POLL_MS = 2500;
+const IDLE_POLL_MS = 15000;
 const IDLE_AFTER_MS = 60000;
 const MAX_BACKOFF_MS = 30000;
+
+/** Same-browser tab notifications: metadata only, never keys or content. */
+const CHANNEL_NAME = "txt-document";
+const CHANGE_MESSAGE = "document-changed";
 
 export class SyncEngine {
   private readonly bridge: CryptoBridge;
@@ -79,6 +91,7 @@ export class SyncEngine {
   private syncing = false;
   private dirty = false;
   private pendingRemoteApply: DocumentModel | null = null;
+  private channel: BroadcastChannel | null = null;
 
   constructor(options: {
     bridge: CryptoBridge;
@@ -124,6 +137,7 @@ export class SyncEngine {
     window.addEventListener("focus", this.onFocus);
     window.addEventListener("online", this.onFocus);
     window.addEventListener("offline", () => this.callbacks.onState("offline"));
+    this.startChannel();
   }
 
   stop(): void {
@@ -132,6 +146,35 @@ export class SyncEngine {
     document.removeEventListener("visibilitychange", this.onVisibility);
     window.removeEventListener("focus", this.onFocus);
     window.removeEventListener("online", this.onFocus);
+    this.channel?.close();
+    this.channel = null;
+  }
+
+  /**
+   * Same-browser notifications (spec §10.5). Only that the document changed is
+   * broadcast — never keys or content; receivers re-fetch from the API. A
+   * missing notification is harmless because polling still converges.
+   */
+  private startChannel(): void {
+    if (typeof BroadcastChannel === "undefined") return;
+    try {
+      this.channel = new BroadcastChannel(`${CHANNEL_NAME}:${this.documentId}`);
+      this.channel.addEventListener("message", (event) => {
+        if (event.data !== CHANGE_MESSAGE) return;
+        // Another tab saved: fetch immediately instead of waiting for the poll.
+        void this.refreshRemote();
+      });
+    } catch {
+      this.channel = null; // private mode or unsupported: polling covers it
+    }
+  }
+
+  private announceChange(): void {
+    try {
+      this.channel?.postMessage(CHANGE_MESSAGE);
+    } catch {
+      // A failed announcement never affects the save itself.
+    }
   }
 
   private clearTimers(): void {
@@ -258,6 +301,13 @@ export class SyncEngine {
         this.scheduleSave();
       } else {
         this.dirty = false;
+        // The server now holds this content: the local draft is no longer a
+        // recovery source and must not trigger a confirmation on next load.
+        this.persistedGeneration = generation;
+        void this.clearSyncedDraft();
+        // Tell other tabs in this browser to fetch now instead of waiting for
+        // their next poll (spec §10.5).
+        this.announceChange();
         this.callbacks.onState("saved");
         window.setTimeout(() => {
           if (!this.dirty) this.callbacks.onState("idle");
@@ -544,6 +594,24 @@ export class SyncEngine {
     } catch {
       // Local persistence failures are surfaced by the caller's state machine;
       // an encrypted draft is best effort only (§10.6).
+    }
+  }
+
+  /**
+   * Drops the local draft once the server holds the same content.
+   *
+   * Keeping it would make every reload ask "未確定の入力が残っています" for
+   * content that is already saved. The draft exists to protect *unsynced*
+   * input, so it is cleared on a confirmed save (spec §10.6).
+   */
+  private async clearSyncedDraft(): Promise<void> {
+    try {
+      await clearDraft({
+        accountId: this.accountId,
+        documentId: this.documentId,
+      });
+    } catch {
+      // A leftover draft only costs an extra confirmation, never data.
     }
   }
 }

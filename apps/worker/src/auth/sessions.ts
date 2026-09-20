@@ -14,6 +14,11 @@
 import type { Env, SessionRow } from "../types.ts";
 import { ApiError, scopeRequired, unauthorized } from "../errors.ts";
 import { sha256, nowMs, bytesToBase64Url } from "../util.ts";
+import {
+  SESSION_ABSOLUTE_TTL_MS,
+  SESSION_IDLE_TTL_MS,
+  STEPUP_TTL_MS as SHARED_STEPUP_TTL_MS,
+} from "../../../../packages/protocol/src/windows.ts";
 
 export const SESSION_COOKIE = "__Host-txt_session";
 
@@ -27,9 +32,11 @@ export const SESSION_COOKIE = "__Host-txt_session";
 export function sessionCookieName(env: Env): string {
   return env.APP_ORIGIN.startsWith("https://") ? SESSION_COOKIE : "txt_session";
 }
-export const ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-export const IDLE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-export const STEPUP_TTL_MS = 5 * 60 * 1000;
+// Windows live in the shared protocol package so the web app, the worker and
+// the tests cannot drift (spec §5.4).
+export const ABSOLUTE_TTL_MS = SESSION_ABSOLUTE_TTL_MS;
+export const IDLE_TTL_MS = SESSION_IDLE_TTL_MS;
+export const STEPUP_TTL_MS = SHARED_STEPUP_TTL_MS;
 
 export interface AuthContext {
   session: SessionRow;
@@ -228,7 +235,9 @@ export async function touchSession(env: Env, auth: AuthContext): Promise<void> {
 export function sessionCookie(token: string, env: Env): string {
   const secure = env.APP_ORIGIN.startsWith("https://") ? "; Secure" : "";
   // No Domain attribute: `__Host-` requires host-only scope, Path=/ and Secure.
-  return `${sessionCookieName(env)}=${token}; HttpOnly; Path=/; SameSite=Strict${secure}`;
+  // `Max-Age` makes this a persistent cookie: without it the browser drops the
+  // session on close, which would defeat the 30-day idle window (spec §5.4).
+  return `${sessionCookieName(env)}=${token}; HttpOnly; Path=/; SameSite=Strict${secure}; Max-Age=${Math.floor(ABSOLUTE_TTL_MS / 1000)}`;
 }
 
 export function clearSessionCookie(env: Env): string {

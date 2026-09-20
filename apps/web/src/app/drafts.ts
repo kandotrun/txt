@@ -15,7 +15,6 @@ import {
   randomBytes,
 } from "../../../../packages/protocol/src/crypto.ts";
 import { fromBase64Url, toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
-
 const DB_NAME = "txt-drafts";
 const DB_VERSION = 1;
 const STORE = "drafts";

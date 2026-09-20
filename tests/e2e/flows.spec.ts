@@ -85,11 +85,10 @@ test("registers with a passkey, edits, and syncs", async ({ page }) => {
   await page.keyboard.type("二行目。");
   await expect(page.locator("#sync-status")).toHaveText(/同期済み|保存中/, { timeout: 20000 });
 
-  // Reload: the encrypted document must come back byte-identical.
+  // Reload: with device keeping on (default), the document opens without a
+  // passkey ceremony (spec §6.4). The encrypted content must come back intact.
   await page.waitForTimeout(1500);
   await page.reload();
-  await expect(page.getByRole("button", { name: "パスキーで開く" })).toBeVisible({ timeout: 20000 });
-  await page.getByRole("button", { name: "パスキーで開く" }).click();
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   const text = await page.locator("#editor-host .ProseMirror").textContent();
   expect(text).toContain("最初の文章。");
@@ -106,6 +105,84 @@ test("registers with a passkey, edits, and syncs", async ({ page }) => {
       !line.includes("cloudflareinsights.com"),
   );
   expect(unexpectedErrors).toEqual([]);
+});
+
+test("keeps the vault on this device so a return visit needs no passkey", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await page.getByRole("button", { name: "はじめて使う" }).click();
+  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await page.getByRole("button", { name: "コピーしました" }).click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
+
+  await page.locator("#editor-host .ProseMirror").click();
+  await page.keyboard.type("保持のテスト。");
+  await waitForSync(page);
+
+  // A record must exist in the device store, wrapped by a non-extractable key
+  // (the raw wrapper bytes are never readable from script).
+  const kept = await page.evaluate(async () => {
+    const request = indexedDB.open("txt-device");
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const record = await new Promise<Record<string, unknown> | undefined>((resolve, reject) => {
+      const transaction = database.transaction("vault", "readonly");
+      const get = transaction.objectStore("vault").getAll();
+      get.onsuccess = () => resolve((get.result as Record<string, unknown>[])[0]);
+      get.onerror = () => reject(get.error);
+    });
+    database.close();
+    if (!record) return null;
+    const deviceKey = record.deviceKey as CryptoKey;
+    return {
+      hasWrapped: typeof record.wrapped === "string" && (record.wrapped as string).length > 20,
+      extractable: deviceKey.extractable,
+      expiresInDays: Math.round(((record.expiresAt as number) - Date.now()) / 86_400_000),
+    };
+  });
+  expect(kept).not.toBeNull();
+  expect(kept?.hasWrapped).toBe(true);
+  // The wrapper must be non-extractable: its raw bytes cannot be exported.
+  expect(kept?.extractable).toBe(false);
+  expect(kept?.expiresInDays).toBeGreaterThanOrEqual(29);
+
+  // A fresh visit (new page, same profile) unlocks without any ceremony.
+  const reopened = await page.context().newPage();
+  await reopened.goto(BASE);
+  await expect(reopened.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(reopened.locator("#editor-host .ProseMirror")).toContainText("保持のテスト。", {
+    timeout: 20000,
+  });
+  await expect(reopened.getByRole("button", { name: "パスキーで開く" })).toHaveCount(0);
+  await reopened.close();
+
+  // Explicit lock drops the kept copy: the next visit asks for the passkey.
+  await page.locator("#more-button").click();
+  await expect(page.getByText("この端末ではパスキーなしで開けます", { exact: false })).toBeVisible({
+    timeout: 15000,
+  });
+  await page.getByRole("button", { name: "今すぐロック" }).click();
+  await expect(page.getByRole("button", { name: "パスキーで開く" })).toBeVisible({ timeout: 20000 });
+
+  const afterLock = await page.evaluate(async () => {
+    const request = indexedDB.open("txt-device");
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const count = await new Promise<number>((resolve, reject) => {
+      const transaction = database.transaction("vault", "readonly");
+      const get = transaction.objectStore("vault").count();
+      get.onsuccess = () => resolve(get.result);
+      get.onerror = () => reject(get.error);
+    });
+    database.close();
+    return count;
+  });
+  expect(afterLock).toBe(0);
 });
 
 test("preserves IME composition without syncing it mid-composition", async ({ page }) => {
@@ -164,10 +241,14 @@ test("preserves IME composition without syncing it mid-composition", async ({ pa
   expect(text).toContain("日本語");
   expect(text?.match(/日本語/g)?.length).toBe(1);
 
-  // And it must round-trip through save/load.
+  // And it must round-trip through save/load. Device keeping (default) reopens
+  // without a ceremony; if the profile lacks it, the gate appears instead.
   await page.waitForTimeout(1200);
   await page.reload();
-  await page.getByRole("button", { name: "パスキーで開く" }).click();
+  const reopenGate = page.getByRole("button", { name: "パスキーで開く" });
+  if (await reopenGate.isVisible().catch(() => false)) {
+    await reopenGate.click();
+  }
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   const reloaded = await page.locator("#editor-host .ProseMirror").textContent();
   expect(reloaded).toContain("日本語");
@@ -221,10 +302,18 @@ test("uploads an image and serves it through the encrypted range path", async ({
   await page.waitForTimeout(1200);
 
   // Reload: the image metadata comes from the encrypted document and the bytes
-  // are fetched + decrypted client-side.
+  // are fetched + decrypted client-side. Device keeping unlocks without a
+  // ceremony; if the profile lacks it, the gate appears instead.
   await page.reload();
-  await expect(page.getByRole("button", { name: "パスキーで開く" })).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "パスキーで開く" }).click();
+  const mediaGate = page.getByRole("button", { name: "パスキーで開く" });
+  // Either the editor appears on its own (device keeping) or the gate does.
+  await Promise.race([
+    page.locator("#app:not([hidden])").waitFor({ timeout: 30000 }).catch(() => undefined),
+    mediaGate.waitFor({ timeout: 30000 }).catch(() => undefined),
+  ]);
+  if (await mediaGate.isVisible().catch(() => false)) {
+    await mediaGate.click();
+  }
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   // The image must be re-materialized from the encrypted blob after reload.
   await page.waitForFunction(
