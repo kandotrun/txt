@@ -22,9 +22,9 @@
 		A1000002000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1000002000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A1000002000000000000004 /* EditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextView.swift; sourceTree = "<group>"; };
-		A1000002000000000000005 /* PasskeyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyClient.swift; sourceTree = "<group>"; };
-		A1000002000000000000006 /* MediaUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaUploader.swift; sourceTree = "<group>"; };
-		A1000002000000000000007 /* SharedEditorState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedEditorState.swift; sourceTree = "<group>"; };
+		A1000002000000000000005 /* PasskeyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PasskeyClient.swift; path = ../../shared/PasskeyClient.swift; sourceTree = "<group>"; };
+		A1000002000000000000006 /* MediaUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MediaUploader.swift; path = ../../shared/MediaUploader.swift; sourceTree = "<group>"; };
+		A1000002000000000000007 /* SharedEditorState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SharedEditorState.swift; path = ../../shared/SharedEditorState.swift; sourceTree = "<group>"; };
 		A1000003000000000000001 /* TxtMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TxtMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1000005000000000000001 /* TxtCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = TxtCore; path = ../../../packages/TxtCore; sourceTree = "<group>"; };
 /* End PBXFileReference section */

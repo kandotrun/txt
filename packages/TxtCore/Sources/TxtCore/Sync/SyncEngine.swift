@@ -437,7 +437,43 @@ public actor SyncEngine {
             inFlight = nil
             scheduleSave()
         case .pending:
-            break
+            // The UI will answer later; hold the fetched version so the
+            // decision can be applied without another round trip (spec §10.4).
+            pendingConflict = ConflictDetails(
+                local: local,
+                remote: remoteDocument,
+                remoteEtag: envelope.etag ?? "",
+                remoteRevision: remote.revision
+            )
+            pendingConflictDocument = remoteDocument
+        }
+    }
+
+    /// Conflict the UI deferred to the user (spec §10.4).
+    private var pendingConflict: ConflictDetails?
+    private var pendingConflictDocument: DocumentModel?
+
+    /// Applies a deferred conflict decision chosen in the UI.
+    public func resolvePendingConflict(_ decision: ConflictDecision) async {
+        guard let resolved = pendingConflict, let remote = pendingConflictDocument else { return }
+        pendingConflict = nil
+        pendingConflictDocument = nil
+        switch decision {
+        case .useRemote:
+            baseEtag = resolved.remoteEtag
+            baseRevision = resolved.remoteRevision
+            persistedGeneration = committedGeneration
+            dirty = false
+            callbacks.applyRemote(remote, true)
+            callbacks.onState(.saved)
+        case .keepLocal:
+            baseEtag = resolved.remoteEtag
+            baseRevision = resolved.remoteRevision
+            inFlight = nil
+            await flush()
+        case .pending:
+            pendingConflict = resolved
+            pendingConflictDocument = remote
         }
     }
 

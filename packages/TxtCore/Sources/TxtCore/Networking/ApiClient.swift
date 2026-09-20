@@ -265,11 +265,12 @@ public struct ApiClient: Sendable {
 
     /// Native sends `clientKind: "native"` so the challenge is bound to the
     /// native client and the session is issued as a Bearer token.
-    public func registerVerify(_ response: [String: Any]) async throws -> VerifyResult {
-        try await request(
+    public func registerVerify(_ response: PasskeyRegistrationDTO) async throws -> VerifyResult {
+        let body = try JSONEncoder().encode(["response": response])
+        return try await requestBody(
             "/api/v1/auth/register/verify",
             method: "POST",
-            json: ["response": response],
+            body: body,
             decode: VerifyResult.self
         )
     }
@@ -278,11 +279,12 @@ public struct ApiClient: Sendable {
         try await request("/api/v1/auth/login/options", method: "POST", json: [:], decode: LoginOptions.self)
     }
 
-    public func loginVerify(_ response: [String: Any]) async throws -> VerifyResult {
-        try await request(
+    public func loginVerify(_ response: PasskeyAssertionDTO) async throws -> VerifyResult {
+        let body = try JSONEncoder().encode(["response": response])
+        return try await requestBody(
             "/api/v1/auth/login/verify",
             method: "POST",
-            json: ["response": response],
+            body: body,
             decode: VerifyResult.self
         )
     }

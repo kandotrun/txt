@@ -32,3 +32,35 @@ what lets a passkey created in Safari unlock the native app (spec §13).
   which is how the boot flow is verified when the machine has no interactive
   session (AppKit cannot connect to the window server over SSH, and
   Accessibility automation is unavailable there).
+
+## iOS
+
+`iOS/TxtIOS` is the iOS app: one scene, standard toolbar, `UITextView`/TextKit
+editing surface, PhotosPicker/fileImporter for attachments, and inline playback
+of encrypted audio/video through the range loader.
+
+```sh
+cd apps/apple/iOS
+xcodebuild -project TxtIOS.xcodeproj -scheme TxtIOS \
+  -destination "generic/platform=iOS Simulator" build
+
+# Run it on a simulator
+xcrun simctl boot "iPhone 17"
+xcrun simctl install booted <DerivedData>/TxtIOS.app
+xcrun simctl launch booted com.tsuqrea.txt.ios
+```
+
+Shared sources (`PasskeyClient`, `MediaUploader`, `SharedEditorState`) live in
+`apps/apple/shared` and are compiled into both apps, so the ceremony code and
+upload pipeline cannot drift between platforms.
+
+### What is verified automatically
+
+- `swift test` (TxtCore): crypto vectors, document model/repair, editor bridge.
+- macOS app: builds; run with `TXT_DIAGNOSTICS=1` it renders its window
+  (900×680, 「テキスト」) and reaches the production API (401 → first-visit gate).
+- iOS app: builds for the simulator; launching it on a booted simulator shows
+  the first-visit gate with the spec §4.6 copy, confirmed by screenshot.
+
+Passkey ceremonies themselves need a real user gesture and an authenticated
+Apple ID, so they are exercised on device, not in CI.

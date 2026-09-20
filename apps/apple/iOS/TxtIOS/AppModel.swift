@@ -1,15 +1,15 @@
-import AppKit
+import AVFoundation
 import Combine
 import SwiftUI
-import UniformTypeIdentifiers
 import TxtCore
+import UIKit
 
-/// Application state (spec §4.6, §5, §6, §10).
+/// Application state (spec §4.3, §4.6, §5, §6, §10).
 ///
-/// Owns the gate/unlocked state machine, the passkey + VaultKey flow, the sync
-/// engine and the media attachment pipeline. The sync actor cannot read
-/// `@Published` state, so the committed document and the IME safe point are
-/// mirrored into `SharedEditorState` under a lock (spec §10.1).
+/// Same state machine as the macOS app — gate, unlock, sync, lock — with iOS
+/// specifics: the app is a single scene, media playback uses the decrypted
+/// range loader, and backgrounding is observed through `UIApplication`
+/// notifications so a relock can be enforced on return.
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
@@ -30,22 +30,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var syncState: SyncState = .idle
     @Published private(set) var statusText: String?
     @Published private(set) var keepsKeyOnDevice = false
-    @Published var isImporterPresented = false
+    @Published var isPickerPresented = false
     @Published var isRecoveryPresented = false
-    @Published var isPasskeySheetPresented = false
+    @Published var isRecoveryKeySheetPresented = false
     @Published private(set) var pendingRecoveryKey = ""
     @Published private(set) var attachProgress: [String: Double] = [:]
-
-    let allowedContentTypes: [UTType] = [
-        .image, .movie, .video, .audio, .mpeg4Movie, .quickTimeMovie, .mp3, .wav, .aiff,
-    ]
 
     private let api: ApiClient
     private let bridge = CryptoBridge()
     private let passkeys = PasskeyClient()
     private let draftStore = DraftStore()
-    private let origin: URL
-    private let rpId: String
+    private let players = MediaPlayerRegistry()
+    private let rpId = "txt.2-38.com"
     private let shared = SharedEditorState()
     private var sync: SyncEngine?
     private var vaultKey: [UInt8]?
@@ -57,26 +53,45 @@ final class AppModel: ObservableObject {
     private var lastActivity = Date()
     private let lockAfterSeconds: TimeInterval = 5 * 60
 
-    init(origin: URL = URL(string: "https://txt.2-38.com")!, rpId: String = "txt.2-38.com") {
-        self.origin = origin
-        self.rpId = rpId
-        self.api = ApiClient(origin: origin, tokenProvider: { SessionTokenStore.load() })
+    init() {
+        self.api = ApiClient(
+            origin: URL(string: "https://txt.2-38.com")!,
+            tokenProvider: { SessionTokenStore.load() }
+        )
     }
 
     // MARK: - Lifecycle
 
     func onAppear() async {
-        observeWorkspace()
+        observeApplication()
         await boot()
     }
 
-    private func observeWorkspace() {
+    private func observeApplication() {
         let center = NotificationCenter.default
-        center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in await self?.becameActive() }
         }
-        center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+        center.addObserver(
+            forName: UIApplication.willResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
             Task { @MainActor in self?.resignedActive() }
+        }
+        // A lock screen or a system lock must protect the plaintext (§6.4).
+        center.addObserver(
+            forName: UIApplication.protectedDataWillBecomeUnavailableNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.lock(reason: "端末がロックされました。", forgetKey: false)
+            }
         }
     }
 
@@ -113,44 +128,28 @@ final class AppModel: ObservableObject {
     // MARK: - Boot
 
     private func boot() async {
-        diag("boot:start")
         do {
             let session = try await api.session()
-            diag("boot:session-scope=\(session.scope)")
             accountId = session.accountId
             if session.scope == "pending" {
                 phase = .gate(.completingRegistration)
                 return
             }
             if let stored = VaultKeyStore.load(accountId: session.accountId) {
-                diag("boot:kept-key-found")
                 keepsKeyOnDevice = true
                 await startSession(vaultKey: stored, accountId: session.accountId)
                 return
             }
-            diag("boot:gate-needs-unlock")
             phase = .gate(.needsUnlock(reason: "暗号化された内容を開くため、パスキーを確認します。"))
         } catch let error as TxtError {
-            diag("boot:error=\(Self.describe(error))")
             if case .api(401, _, _) = error {
                 phase = .gate(.firstVisit)
             } else {
                 phase = .gate(.error(Self.describe(error)))
             }
         } catch {
-            diag("boot:error=\(error.localizedDescription)")
             phase = .gate(.error(error.localizedDescription))
         }
-    }
-
-    /// Writes a one-line trace to stderr when diagnostics are enabled.
-    ///
-    /// The app cannot be driven over SSH (no window-server connection, no
-    /// Accessibility permissions), so this trace is how the boot flow is
-    /// verified on a machine without an interactive session.
-    private func diag(_ message: String) {
-        guard ProcessInfo.processInfo.environment["TXT_DIAGNOSTICS"] != nil else { return }
-        FileHandle.standardError.write(Data("TXT_DIAG \(message)\n".utf8))
     }
 
     // MARK: - Gate copy (spec §4.6)
@@ -204,14 +203,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    var gateSymbol: String {
-        switch phase {
-        case .gate(.error): "exclamationmark.triangle"
-        case .gate(.needsUnlock), .gate(.completingRegistration): "lock"
-        default: "text.page"
-        }
-    }
-
     var isUnlocked: Bool { vaultKey != nil }
 
     func performGatePrimary() {
@@ -234,13 +225,9 @@ final class AppModel: ObservableObject {
     private func register() async {
         phase = .loading
         do {
-            let outcome = try await AccountFlow.register(
-                api: api,
-                ceremonies: passkeys,
-                rpId: rpId
-            )
+            let outcome = try await AccountFlow.register(api: api, ceremonies: passkeys, rpId: rpId)
             pendingRecoveryKey = outcome.recoveryKeyText
-            isPasskeySheetPresented = true
+            isRecoveryKeySheetPresented = true
             VaultKeyStore.store(vaultKey: outcome.vaultKey, accountId: outcome.accountId)
             keepsKeyOnDevice = true
             await startSession(
@@ -255,6 +242,7 @@ final class AppModel: ObservableObject {
 
     func confirmRecoverySaved() {
         pendingRecoveryKey = ""
+        isRecoveryKeySheetPresented = false
     }
 
     // MARK: - Unlock (spec §6.2)
@@ -265,17 +253,10 @@ final class AppModel: ObservableObject {
             let resolved: AccountFlow.UnlockedVault
             if let existing = accountId {
                 resolved = try await AccountFlow.unlockExisting(
-                    api: api,
-                    ceremonies: passkeys,
-                    rpId: rpId,
-                    accountId: existing
+                    api: api, ceremonies: passkeys, rpId: rpId, accountId: existing
                 )
             } else {
-                resolved = try await AccountFlow.loginAndUnlock(
-                    api: api,
-                    ceremonies: passkeys,
-                    rpId: rpId
-                )
+                resolved = try await AccountFlow.loginAndUnlock(api: api, ceremonies: passkeys, rpId: rpId)
             }
             VaultKeyStore.store(vaultKey: resolved.vaultKey, accountId: resolved.accountId)
             keepsKeyOnDevice = true
@@ -291,12 +272,6 @@ final class AppModel: ObservableObject {
 
     // MARK: - Session
 
-    /// Starts the unlocked session.
-    ///
-    /// `expectedDocumentId` is required right after bootstrap/registration,
-    /// where the account must be the one the local flow just created. Without
-    /// it the server's document would be trusted blindly, which would be wrong
-    /// if the local state and the server disagreed.
     private func startSession(
         vaultKey: [UInt8],
         accountId: String,
@@ -409,14 +384,7 @@ final class AppModel: ObservableObject {
 
     private func applySyncState(_ state: SyncState) {
         syncState = state
-        switch state {
-        case .idle:
-            setStatus(nil)
-        case .saved:
-            setStatus(state.label)
-        case .saving, .localOnly, .offline, .conflict, .authExpired, .decryptFailed:
-            setStatus(state.label)
-        }
+        setStatus(state.label.isEmpty ? nil : state.label)
     }
 
     private func setStatus(_ text: String?) {
@@ -433,22 +401,28 @@ final class AppModel: ObservableObject {
     }
 
     private func promptConflict(_ details: ConflictDetails) -> ConflictDecision {
-        let alert = NSAlert()
-        alert.messageText = "競合しています"
-        alert.informativeText = "この端末の内容と、サーバーに保存されている内容が異なります。"
-        alert.addButton(withTitle: "編集して保存")
-        alert.addButton(withTitle: "サーバーの内容を使う")
-        return alert.runModal() == .alertFirstButtonReturn ? .keepLocal : .useRemote
+        // iOS uses a SwiftUI alert; the model exposes the pending conflict and
+        // the view drives the decision.
+        pendingConflict = details
+        return .pending
+    }
+
+    /// Conflict awaiting a user decision in the view (spec §10.4).
+    @Published var pendingConflict: ConflictDetails?
+
+    func resolveConflict(_ decision: ConflictDecision) {
+        pendingConflict = nil
+        Task { await sync?.resolvePendingConflict(decision) }
     }
 
     // MARK: - Attachments (spec §11.3)
 
-    func attachFiles(_ urls: [URL], at position: Int?) {
+    func attachFiles(_ urls: [URL]) {
         guard isUnlocked else { return }
-        Task { await attach(urls, at: position) }
+        Task { await attach(urls) }
     }
 
-    private func attach(_ urls: [URL], at position: Int?) async {
+    private func attach(_ urls: [URL]) async {
         for url in urls {
             let key = url.lastPathComponent
             attachProgress[key] = 0
@@ -463,13 +437,30 @@ final class AppModel: ObservableObject {
                         Task { @MainActor in self?.attachProgress[key] = fraction }
                     }
                 )
-                let index = position ?? max(0, document.blocks.count - 1)
-                let next = EditorBridge.insertMediaAtBoundary(document, mediaId: mediaId, position: index)
+                // A pending attachment lands at the caret when the editor knows
+                // it, otherwise at the end (spec §11.3).
+                let next = EditorBridge.insertMediaAtBoundary(
+                    document,
+                    mediaId: mediaId,
+                    position: pendingInsertionIndex ?? max(0, document.blocks.count - 1)
+                )
+                pendingInsertionIndex = nil
                 documentChanged(next)
             } catch {
                 setStatus("添付に失敗しました: \(Self.describe(error))")
             }
         }
+    }
+
+    /// Caret position captured when the attach button is pressed: the picker
+    /// takes over the UI, and iOS can reset the selection while it is open.
+    var pendingInsertionIndex: Int?
+
+    // MARK: - Media playback
+
+    func player(for mediaId: String) -> AVPlayer? {
+        guard let info = document.media[mediaId] else { return nil }
+        return players.player(mediaId: mediaId, info: info, api: api, bridge: bridge)
     }
 
     // MARK: - Key management
@@ -495,12 +486,14 @@ final class AppModel: ObservableObject {
         }
         sync = nil
         Task { await bridge.lock() }
+        players.stopAll()
         if forgetKey, let accountId { _ = VaultKeyStore.delete(accountId: accountId) }
         keepsKeyOnDevice = false
         vaultKey = nil
         shared.document = DocumentModel.empty()
         shared.isComposing = false
         document = DocumentModel.empty()
+        pendingConflict = nil
         phase = .gate(.needsUnlock(reason: reason))
     }
 
@@ -523,12 +516,6 @@ final class AppModel: ObservableObject {
     }
 
     func deleteAccount() {
-        let alert = NSAlert()
-        alert.messageText = "アカウントを削除しますか"
-        alert.informativeText = "本文・添付・鍵が削除され、元に戻せません。"
-        alert.addButton(withTitle: "削除する")
-        alert.addButton(withTitle: "やめる")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
         Task {
             do {
                 _ = try await api.deleteAccount(operationId: UUID().uuidString.lowercased())

@@ -3,15 +3,19 @@ import CryptoKit
 import Foundation
 import TxtCore
 
-/// Passkey ceremonies with PRF (spec §6.2, §13).
+/// Passkey ceremonies with PRF (spec §6.2, §13), shared by macOS and iOS.
 ///
 /// The native client uses `ASAuthorization` with the shared RP ID
 /// `txt.2-38.com` and the fixed public PRF input, so the KEK it derives for a
 /// credential is byte-identical to the one the Web client derives for the same
 /// credential. A ceremony that authenticates without a usable PRF is a failure:
 /// there is no server-side key fallback (spec §7).
+///
+/// The DTOs carry **only** the fields signature verification needs. PRF results
+/// never travel; the server sanitizes again on arrival, so a mistake here would
+/// still be caught — but it must not happen.
 @MainActor
-final class PasskeyClient: NSObject {
+final class PasskeyClient: NSObject, PasskeyCeremonies, @unchecked Sendable {
     enum PasskeyError: Error, LocalizedError {
         case cancelled
         case noPrf
@@ -26,12 +30,6 @@ final class PasskeyClient: NSObject {
         }
     }
 
-    struct Ceremony: Sendable {
-        var credentialId: String
-        var credentialIdRaw: [UInt8]
-        var prfOutput: [UInt8]?
-    }
-
     private var continuation: CheckedContinuation<ASAuthorization, Error>?
 
     /// The fixed PRF salt shared with the Web client (spec §6.2).
@@ -41,7 +39,10 @@ final class PasskeyClient: NSObject {
 
     // MARK: - Registration
 
-    func createCredential(options: ApiClient.RegisterOptions.Options, rpId: String) async throws -> Ceremony {
+    func createCredential(
+        options: ApiClient.RegisterOptions.Options,
+        rpId: String
+    ) async throws -> PasskeyRegistration {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpId)
         let challenge = (try? Base64Url.decode(options.challenge)).map { Data($0) } ?? Data()
         let userID = (try? Base64Url.decode(options.user.id)).map { Data($0) } ?? Data()
@@ -52,8 +53,6 @@ final class PasskeyClient: NSObject {
         )
         request.userVerificationPreference = .preferred
         request.attestationPreference = .none
-        // Evaluating the PRF at registration is what makes the credential
-        // usable for unwrapping without a second ceremony later.
         request.prf = ASAuthorizationPublicKeyCredentialPRFRegistrationInput.inputValues(
             .init(saltInput1: prfSalt)
         )
@@ -62,16 +61,32 @@ final class PasskeyClient: NSObject {
         guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialRegistration else {
             throw PasskeyError.failed("パスキーの作成に失敗しました。")
         }
-        return Ceremony(
-            credentialId: Base64Url.encode([UInt8](credential.credentialID)),
-            credentialIdRaw: [UInt8](credential.credentialID),
+        let credentialIdRaw = [UInt8](credential.credentialID)
+        let clientDataJSON = Base64Url.encode([UInt8](credential.rawClientDataJSON))
+        let attestationObject = Base64Url.encode([UInt8](credential.rawAttestationObject ?? Data()))
+        guard !attestationObject.isEmpty else {
+            throw PasskeyError.failed("パスキーの構成情報を取得できませんでした。")
+        }
+        let dto = PasskeyRegistrationDTO(
+            id: Base64Url.encode(credentialIdRaw),
+            rawId: Base64Url.encode(credentialIdRaw),
+            clientDataJSON: clientDataJSON,
+            attestationObject: attestationObject
+        )
+        return PasskeyRegistration(
+            dto: dto,
+            credentialId: Base64Url.encode(credentialIdRaw),
+            credentialIdRaw: credentialIdRaw,
             prfOutput: Self.symmetricKeyBytes(credential.prf?.first)
         )
     }
 
     // MARK: - Assertion
 
-    func assertCredential(options: ApiClient.LoginOptions.Options, rpId: String) async throws -> Ceremony {
+    func assertCredential(
+        options: ApiClient.LoginOptions.Options,
+        rpId: String
+    ) async throws -> PasskeyAssertion {
         let provider = ASAuthorizationPlatformPublicKeyCredentialProvider(relyingPartyIdentifier: rpId)
         let challenge = (try? Base64Url.decode(options.challenge)).map { Data($0) } ?? Data()
         let request = provider.createCredentialAssertionRequest(challenge: challenge)
@@ -89,14 +104,34 @@ final class PasskeyClient: NSObject {
         guard let credential = authorization.credential as? ASAuthorizationPlatformPublicKeyCredentialAssertion else {
             throw PasskeyError.failed("パスキーの確認に失敗しました。")
         }
+        let credentialIdRaw = [UInt8](credential.credentialID)
+        // The user handle belongs in `response.userHandle`, never inside
+        // authenticatorData (spec §6.2).
+        let userHandle = credential.userID.isEmpty
+            ? nil
+            : Base64Url.encode([UInt8](credential.userID))
+        let dto = PasskeyAssertionDTO(
+            id: Base64Url.encode(credentialIdRaw),
+            rawId: Base64Url.encode(credentialIdRaw),
+            clientDataJSON: Base64Url.encode([UInt8](credential.rawClientDataJSON)),
+            authenticatorData: Base64Url.encode([UInt8](credential.rawAuthenticatorData)),
+            signature: Base64Url.encode([UInt8](credential.signature)),
+            userHandle: userHandle
+        )
         // `first` is the PRF output for saltInput1 — exactly the bytes the Web
         // client reads from `getClientExtensionResults().prf.results.first`.
-        let prfOutput = Self.symmetricKeyBytes(credential.prf?.first)
-        return Ceremony(
-            credentialId: Base64Url.encode([UInt8](credential.credentialID)),
-            credentialIdRaw: [UInt8](credential.credentialID),
-            prfOutput: prfOutput
+        return PasskeyAssertion(
+            dto: dto,
+            credentialId: Base64Url.encode(credentialIdRaw),
+            credentialIdRaw: credentialIdRaw,
+            prfOutput: Self.symmetricKeyBytes(credential.prf?.first)
         )
+    }
+
+    // MARK: - Session token
+
+    nonisolated func storeSessionToken(_ token: String) async {
+        SessionTokenStore.store(token: token)
     }
 
     /// Extracts raw bytes from a `SymmetricKey` PRF output.
@@ -149,7 +184,14 @@ extension PasskeyClient: ASAuthorizationControllerDelegate {
 extension PasskeyClient: ASAuthorizationControllerPresentationContextProviding {
     nonisolated func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
         MainActor.assumeIsolated {
+            #if os(macOS)
             NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
+            #else
+            // iOS: the key window of the active scene.
+            let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            let window = scenes.flatMap(\.windows).first { $0.isKeyWindow } ?? scenes.first?.windows.first
+            return window ?? ASPresentationAnchor()
+            #endif
         }
     }
 }

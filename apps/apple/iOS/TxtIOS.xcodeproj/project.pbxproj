@@ -1,0 +1,314 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B1000001000000000000001 /* TxtIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000001 /* TxtIOSApp.swift */; };
+		B1000001000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000002 /* ContentView.swift */; };
+		B1000001000000000000003 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000003 /* AppModel.swift */; };
+		B1000001000000000000004 /* EditorTextView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000004 /* EditorTextView.swift */; };
+		B1000001000000000000005 /* MediaPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000005 /* MediaPicker.swift */; };
+		B1000001000000000000006 /* MediaPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000006 /* MediaPlayback.swift */; };
+		B1000001000000000000007 /* PasskeyClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000007 /* PasskeyClient.swift */; };
+		B1000001000000000000008 /* MediaUploader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000008 /* MediaUploader.swift */; };
+		B1000001000000000000009 /* SharedEditorState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1000002000000000000009 /* SharedEditorState.swift */; };
+		B1000001000000000000010 /* TxtCore in Frameworks */ = {isa = PBXBuildFile; productRef = B1000004000000000000001 /* TxtCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B1000002000000000000001 /* TxtIOSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxtIOSApp.swift; sourceTree = "<group>"; };
+		B1000002000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		B1000002000000000000003 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		B1000002000000000000004 /* EditorTextView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditorTextView.swift; sourceTree = "<group>"; };
+		B1000002000000000000005 /* MediaPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPicker.swift; sourceTree = "<group>"; };
+		B1000002000000000000006 /* MediaPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPlayback.swift; sourceTree = "<group>"; };
+		B1000002000000000000007 /* PasskeyClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = PasskeyClient.swift; path = ../../shared/PasskeyClient.swift; sourceTree = "<group>"; };
+		B1000002000000000000008 /* MediaUploader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = MediaUploader.swift; path = ../../shared/MediaUploader.swift; sourceTree = "<group>"; };
+		B1000002000000000000009 /* SharedEditorState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SharedEditorState.swift; path = ../../shared/SharedEditorState.swift; sourceTree = "<group>"; };
+		B1000003000000000000001 /* TxtIOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TxtIOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B1000006000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1000001000000000000010 /* TxtCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		B1000007000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				B1000007000000000000003 /* TxtIOS */,
+				B1000007000000000000002 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B1000007000000000000002 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B1000003000000000000001 /* TxtIOS.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B1000007000000000000003 /* TxtIOS */ = {
+			isa = PBXGroup;
+			children = (
+				B1000002000000000000001 /* TxtIOSApp.swift */,
+				B1000002000000000000002 /* ContentView.swift */,
+				B1000002000000000000003 /* AppModel.swift */,
+				B1000002000000000000004 /* EditorTextView.swift */,
+				B1000002000000000000005 /* MediaPicker.swift */,
+				B1000002000000000000006 /* MediaPlayback.swift */,
+				B1000002000000000000007 /* PasskeyClient.swift */,
+				B1000002000000000000008 /* MediaUploader.swift */,
+				B1000002000000000000009 /* SharedEditorState.swift */,
+			);
+			path = TxtIOS;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B1000008000000000000001 /* TxtIOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B100000A000000000000002 /* Build configuration list for PBXNativeTarget "TxtIOS" */;
+			buildPhases = (
+				B1000009000000000000001 /* Sources */,
+				B1000006000000000000001 /* Frameworks */,
+				B1000009000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TxtIOS;
+			packageProductDependencies = (
+				B1000004000000000000001 /* TxtCore */,
+			);
+			productName = TxtIOS;
+			productReference = B1000003000000000000001 /* TxtIOS.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		B100000B000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					B1000008000000000000001 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+				};
+			};
+			buildConfigurationList = B100000A000000000000001 /* Build configuration list for PBXProject "TxtIOS" */;
+			developmentRegion = ja;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				ja,
+				en,
+				Base,
+			);
+			mainGroup = B1000007000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B100000C000000000000001 /* XCLocalSwiftPackageReference */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = B1000007000000000000002 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B1000008000000000000001 /* TxtIOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B1000009000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B1000009000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B1000001000000000000001 /* TxtIOSApp.swift in Sources */,
+				B1000001000000000000002 /* ContentView.swift in Sources */,
+				B1000001000000000000003 /* AppModel.swift in Sources */,
+				B1000001000000000000004 /* EditorTextView.swift in Sources */,
+				B1000001000000000000005 /* MediaPicker.swift in Sources */,
+				B1000001000000000000006 /* MediaPlayback.swift in Sources */,
+				B1000001000000000000007 /* PasskeyClient.swift in Sources */,
+				B1000001000000000000008 /* MediaUploader.swift in Sources */,
+				B1000001000000000000009 /* SharedEditorState.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B100000C000000000000001 /* XCLocalSwiftPackageReference "TxtCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../../packages/TxtCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B1000004000000000000001 /* TxtCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = TxtCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+/* Begin XCBuildConfiguration section */
+		B100000D000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		B100000D000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		B100000D000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TxtIOS/TxtIOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8Q42H2N5B3;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = txt;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tsuqrea.txt.ios";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B100000D000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = TxtIOS/TxtIOS.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 8Q42H2N5B3;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = txt;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.tsuqrea.txt.ios";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		B100000A000000000000001 /* Build configuration list for PBXProject "TxtIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B100000D000000000000001 /* Debug */,
+				B100000D000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B100000A000000000000002 /* Build configuration list for PBXNativeTarget "TxtIOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B100000D000000000000003 /* Debug */,
+				B100000D000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = B100000B000000000000001 /* Project object */;
+}
