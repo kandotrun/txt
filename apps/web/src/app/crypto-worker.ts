@@ -20,7 +20,7 @@ import {
   randomBytes,
 } from "../../../../packages/protocol/src/crypto.ts";
 import { fromBase64Url, toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
-import { parseDocument, serializeDocument, validateDocument } from "../../../../packages/protocol/src/document.ts";
+import { repairOrphanedMedia, validateDocument } from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 
 interface UnlockMessage {
@@ -158,8 +158,14 @@ async function handleDecryptDocument(message: DecryptMessage): Promise<void> {
       fromBase64Url(message.ciphertext),
       aad,
     );
-    const issues = validateDocument(JSON.parse(new TextDecoder().decode(plaintext)));
-    if (issues.length > 0) {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+    // An entry that no block references carries no visible content, so a
+    // document whose only defect is such an entry is opened after dropping it
+    // (the client then re-saves the repaired model). Everything else still
+    // fails closed: repairing unknown damage could destroy visible content.
+    const repaired = repairOrphanedMedia(parsed);
+    if (!repaired) {
+      const issues = validateDocument(parsed);
       post({
         type: "decrypt-failed",
         requestId: message.requestId,
@@ -167,11 +173,11 @@ async function handleDecryptDocument(message: DecryptMessage): Promise<void> {
       });
       return;
     }
-    const document = parseDocument(plaintext);
     post({
       type: "decrypted-document",
       requestId: message.requestId,
-      document,
+      document: repaired.document,
+      droppedMediaIds: repaired.dropped,
     });
   } catch (error) {
     post({

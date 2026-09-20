@@ -5,7 +5,7 @@
  * sync engine, media rendering, lock policy, and the "その他" menu.
  */
 
-import { serializeDocument } from "../../../../packages/protocol/src/document.ts";
+import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
 import { IDLE_LOCK_MS } from "../../../../packages/protocol/src/windows.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
@@ -557,8 +557,12 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     bridge,
     callbacks: {
       getDocument: () => {
-        const model = state.editor?.toDocumentModel(state.document.media);
-        return model ?? state.document;
+        const model = state.editor?.toDocumentModel(state.document.media) ?? state.document;
+        // The wire format forbids entries that no block references, and an
+        // upload can outlive the insertion it belonged to (deleted or undone
+        // meanwhile). Pruning at the single read point keeps every save and
+        // draft valid (spec §8).
+        return pruneUnreferencedMedia(model);
       },
       applyRemote: (remote, { fromAdoption }) => {
         state.document = remote;
@@ -571,6 +575,12 @@ async function startSession(vault: UnlockedVault): Promise<void> {
           state.editor?.applyRemoteDocument(remote);
         }
         syncServiceWorkerMedia();
+        // A remote copy that carried unreferenced media entries was opened with
+        // them dropped; persist the repaired model so the stored document stops
+        // being broken for every other client (spec §8).
+        if (bridge.lastDroppedMediaIds.length > 0) {
+          sync.noteCommittedChange();
+        }
       },
       onState: (nextState, detail) => {
         if (generation !== state.sessionGeneration) return;
@@ -612,6 +622,15 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   state.sync = sync;
   sync.start();
 
+  // A document that arrived with unreferenced media entries was opened with
+  // those entries dropped (spec §8). Persist the repaired model once so every
+  // client — including ones that do not implement the repair — sees a clean
+  // document; otherwise the stored copy stays broken forever.
+  if (bridge.lastDroppedMediaIds.length > 0) {
+    toast("添付情報の整合性を修復しました。", 4000);
+    sync.noteCommittedChange();
+  }
+
   // Local draft recovery (§9.6, §10.6): a draft is only meaningful when it
   // holds input the server does not have yet. Committed snapshots are dropped
   // once saved, so anything left here is either unsynced or provisional.
@@ -632,7 +651,12 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     });
     if (decision === "accept") {
       try {
-        const recovered = JSON.parse(draft.documentJson) as DocumentModel;
+        const recovered = pruneUnreferencedMedia(
+          JSON.parse(draft.documentJson) as DocumentModel,
+        );
+        // The app state must carry the recovered media dictionary: the editor
+        // resolves node metadata through `state.document` (spec §10.6).
+        state.document = recovered;
         editor.applyRemoteDocument(recovered);
         sync.noteCommittedChange();
       } catch {
@@ -1032,15 +1056,42 @@ async function showMoreMenu(): Promise<void> {
 /* Wiring                                                              */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Caret position captured when the attach button is pressed.
+ *
+ * iOS Safari drops the editor's focus while the file picker is open and can
+ * move the DOM selection to the start of the surface. Reading the caret in
+ * `change` would then attach at the top of the document, so it is captured at
+ * `pointerdown` — the last moment the editor still owns the selection — and
+ * kept until the picker answers (spec §11.3).
+ */
+let pendingAttachPosition: number | null = null;
+
+elements.attachButton.addEventListener(
+  "pointerdown",
+  () => {
+    pendingAttachPosition = state.editor?.state.selection.from ?? null;
+  },
+  { passive: true },
+);
+
 elements.attachButton.addEventListener("click", () => {
+  // Keyboard activation does not fire pointerdown; keep whatever was captured.
+  if (pendingAttachPosition === null) {
+    pendingAttachPosition = state.editor?.state.selection.from ?? null;
+  }
   elements.fileInput.click();
 });
 
 elements.fileInput.addEventListener("change", () => {
   const files = Array.from(elements.fileInput.files ?? []);
   elements.fileInput.value = "";
-  if (files.length === 0) return;
-  const position = state.editor?.state.selection.from ?? 0;
+  if (files.length === 0) {
+    pendingAttachPosition = null;
+    return;
+  }
+  const position = pendingAttachPosition ?? state.editor?.state.selection.from ?? 0;
+  pendingAttachPosition = null;
   void attachFiles(files, position);
 });
 

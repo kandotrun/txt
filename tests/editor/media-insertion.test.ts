@@ -5,8 +5,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { insertMediaBlock, removeBlock } from "../../apps/web/src/app/document-blocks.ts";
-import { validateDocument } from "../../packages/protocol/src/document.ts";
+import { insertMediaAtCaret, insertMediaBlock, removeBlock } from "../../apps/web/src/app/document-blocks.ts";
+import { pruneUnreferencedMedia, repairOrphanedMedia, validateDocument } from "../../packages/protocol/src/document.ts";
 import type { Block, DocumentModel, MediaInfo } from "../../packages/protocol/src/document.ts";
 
 const MEDIA_ID = "33333333-3333-4333-8333-333333333333";
@@ -127,5 +127,127 @@ describe("removeBlock", () => {
     expect(trimmed[trimmed.length - 1]?.type).toBe("text");
     void B;
     void C;
+  });
+});
+
+describe("insertMediaAtCaret (spec §8)", () => {
+  it("splits the text block at the caret, keeping the left ID", () => {
+    const { blocks, mediaIndex } = insertMediaAtCaret([textBlock(A, "あいうえお")], {
+      mediaId: MEDIA_ID,
+      index: 0,
+      offset: 2,
+    });
+    expect(blocks.map((block) => block.type)).toEqual(["text", "media", "text"]);
+    expect(blocks[0]?.id).toBe(A);
+    expect(blocks[0]?.type === "text" && blocks[0].text).toBe("あい");
+    expect(blocks[2]?.type === "text" && blocks[2].text).toBe("うえお");
+    // The right half is a new ID, never the left one.
+    expect(blocks[2]?.id).not.toBe(A);
+    expect(mediaIndex).toBe(1);
+    expect(validateDocument(toDocument(blocks))).toEqual([]);
+  });
+
+  it("places the media after the text when the caret is at the end", () => {
+    const { blocks } = insertMediaAtCaret([textBlock(A, "末尾")], {
+      mediaId: MEDIA_ID,
+      index: 0,
+      offset: 2,
+    });
+    expect(blocks.map((block) => block.type)).toEqual(["text", "media", "text"]);
+    expect(blocks[0]?.type === "text" && blocks[0].text).toBe("末尾");
+  });
+
+  it("places the media before the text when the caret is at the start", () => {
+    const { blocks } = insertMediaAtCaret([textBlock(A, "先頭")], {
+      mediaId: MEDIA_ID,
+      index: 0,
+      offset: 0,
+    });
+    expect(blocks.map((block) => block.type)).toEqual(["text", "media", "text"]);
+    // The media is not at the very top: an editable text block leads (§8).
+    expect(blocks[0]?.type).toBe("text");
+  });
+
+  it("splits a middle block without touching its neighbours", () => {
+    const { blocks } = insertMediaAtCaret(
+      [textBlock(A, "前"), textBlock(B, "あいうえお"), textBlock(C, "後")],
+      { mediaId: MEDIA_ID, index: 1, offset: 2 },
+    );
+    // 前 → あい → media → うえお → 後
+    expect(blocks.map((block) => block.type)).toEqual(["text", "text", "media", "text", "text"]);
+    const texts = blocks.filter((block) => block.type === "text").map((block) => (block as { text: string }).text);
+    expect(texts).toEqual(["前", "あい", "うえお", "後"]);
+    expect(blocks[0]?.id).toBe(A);
+    expect(blocks[1]?.id).toBe(B);
+    expect(blocks[4]?.id).toBe(C);
+  });
+
+  it("clamps an out-of-range offset instead of losing text", () => {
+    const { blocks } = insertMediaAtCaret([textBlock(A, "短い")], {
+      mediaId: MEDIA_ID,
+      index: 0,
+      offset: 99,
+    });
+    expect(validateDocument(toDocument(blocks))).toEqual([]);
+    const texts = blocks.filter((block) => block.type === "text").map((block) => (block as { text: string }).text);
+    expect(texts.join("")).toBe("短い");
+  });
+});
+
+describe("orphaned media entries (spec §8)", () => {
+  /** A valid document whose single media entry is referenced by a block. */
+  function validWithMedia(): DocumentModel {
+    return {
+      schemaVersion: 1,
+      blocks: [
+        textBlock(A, ""),
+        { id: B, type: "media", mediaId: MEDIA_ID },
+        textBlock(C, ""),
+      ],
+      media: { [MEDIA_ID]: mediaInfo() },
+    };
+  }
+
+  it("pruneUnreferencedMedia drops entries no block references", () => {
+    const orphan = "66666666-6666-4666-8666-666666666666";
+    const doc = validWithMedia();
+    const pruned = pruneUnreferencedMedia({ ...doc, media: { ...doc.media, [orphan]: mediaInfo() } });
+    expect(Object.keys(pruned.media)).toEqual([MEDIA_ID]);
+    expect(validateDocument(pruned)).toEqual([]);
+  });
+
+  it("repairOrphanedMedia opens a document whose only defect is an orphaned entry", () => {
+    const orphan = "66666666-6666-4666-8666-666666666666";
+    const broken = {
+      ...validWithMedia(),
+      media: { [MEDIA_ID]: mediaInfo(), [orphan]: mediaInfo() },
+    };
+    const repaired = repairOrphanedMedia(broken);
+    expect(repaired).not.toBeNull();
+    expect(repaired?.dropped).toEqual([orphan]);
+    expect(Object.keys(repaired?.document.media ?? {})).toEqual([MEDIA_ID]);
+    expect(validateDocument(repaired?.document)).toEqual([]);
+  });
+
+  it("repairOrphanedMedia refuses any other damage", () => {
+    // A media block pointing at a missing entry is not an orphaned entry:
+    // repairing it would have to invent content, so it must keep failing.
+    const broken = {
+      schemaVersion: 1,
+      blocks: [
+        textBlock(A, ""),
+        { id: B, type: "media", mediaId: "55555555-5555-4555-8555-555555555555" },
+        textBlock(C, ""),
+      ],
+      media: {},
+    };
+    expect(repairOrphanedMedia(broken)).toBeNull();
+  });
+
+  it("repairOrphanedMedia passes through a valid document unchanged", () => {
+    const doc = validWithMedia();
+    const repaired = repairOrphanedMedia(doc);
+    expect(repaired?.document).toEqual(doc);
+    expect(repaired?.dropped).toEqual([]);
   });
 });

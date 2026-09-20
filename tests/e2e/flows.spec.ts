@@ -330,6 +330,260 @@ test("uploads an image and serves it through the encrypted range path", async ({
   expect(naturalWidth).toBeGreaterThan(0);
 });
 
+test("inserts a file at the caret instead of the top of the document", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await page.getByRole("button", { name: "はじめて使う" }).click();
+  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await page.getByRole("button", { name: "コピーしました" }).click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
+
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("前半。後半。");
+  // Caret back to the middle: right after "前半。" (3 characters).
+  for (let i = 0; i < 3; i++) await page.keyboard.press("ArrowLeft");
+
+  // Go through the real button flow: the caret is captured on pointerdown,
+  // before the picker opens (this is what iOS loses).
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHUlEQVQoU2NkYGD4z0AEYBxVSFJIYWBgYPgPjQMAoBUGb0kC9XkAAAAASUVORK5CYII=";
+  const buffer = Buffer.from(pngBase64, "base64");
+  const [fileChooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.locator("#attach-button").click(),
+  ]);
+  await fileChooser.setFiles({ name: "caret.png", mimeType: "image/png", buffer });
+
+  await expect(page.locator("#editor-host .txt-media")).toBeVisible({ timeout: 45000 });
+  await page.waitForFunction(
+    () => {
+      const status = document.getElementById("sync-status");
+      return status?.dataset.state === "saved" || status?.dataset.state === "idle";
+    },
+    undefined,
+    { timeout: 30000 },
+  );
+
+  // The media must sit where the caret was: text order 前半。 → media → 後半。
+  const order = await page.evaluate(() => {
+    const host = document.getElementById("editor-host");
+    if (!host) return [];
+    return Array.from(host.querySelectorAll("p, .txt-media")).map((node) =>
+      node.classList.contains("txt-media") ? "media" : (node.textContent ?? ""),
+    );
+  });
+  expect(order).toEqual(["前半。", "media", "後半。"]);
+
+  // And it must survive a reload in the same position.
+  await page.reload();
+  const caretGate = page.getByRole("button", { name: "パスキーで開く" });
+  if (await caretGate.isVisible().catch(() => false)) {
+    await caretGate.click();
+  }
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await page.waitForFunction(
+    () => !!document.querySelector("#editor-host .txt-media"),
+    undefined,
+    { timeout: 30000 },
+  );
+  const reloadedOrder = await page.evaluate(() => {
+    const host = document.getElementById("editor-host");
+    if (!host) return [];
+    return Array.from(host.querySelectorAll("p, .txt-media")).map((node) =>
+      node.classList.contains("txt-media") ? "media" : (node.textContent ?? ""),
+    );
+  });
+  expect(reloadedOrder).toEqual(["前半。", "media", "後半。"]);
+});
+
+test("repairs a stored document that carries an unreferenced media entry", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await page.getByRole("button", { name: "はじめて使う" }).click();
+  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await page.getByRole("button", { name: "コピーしました" }).click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
+
+  // Real content: text plus an uploaded image that must survive the repair.
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("修復テスト。");
+  const pngBase64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHUlEQVQoU2NkYGD4z0AEYBxVSFJIYWBgYPgPjQMAoBUGb0kC9XkAAAAASUVORK5CYII=";
+  const buffer = Buffer.from(pngBase64, "base64");
+  await page.locator("#file-input").setInputFiles({ name: "keep.png", mimeType: "image/png", buffer });
+  await expect(page.locator("#editor-host .txt-media")).toBeVisible({ timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(600);
+
+  // Store a document that also carries an orphaned media entry — exactly the
+  // shape a client can persist when an insertion is undone or deleted and the
+  // dictionary entry stays behind. This used to make the document unreadable
+  // on every device.
+  const injected = await page.evaluate(async () => {
+    interface DebugWindow {
+      __txtDebug?: {
+        state: {
+          bridge: {
+            encryptDocument: (options: Record<string, unknown>) => Promise<{ nonce: string; ciphertext: string }>;
+          };
+          editor: {
+            toDocumentModel: (media: Record<string, unknown>) => Record<string, unknown> & {
+              blocks: Array<{ type: string; mediaId?: string }>;
+              media: Record<string, unknown>;
+            };
+          };
+          document: { media: Record<string, unknown> };
+        };
+      };
+    }
+    const debug = (window as unknown as DebugWindow).__txtDebug;
+    if (!debug) throw new Error("debug hook missing");
+    const { bridge, editor: ed, document: stateDocument } = debug.state;
+    const model = ed.toDocumentModel(stateDocument.media);
+    const orphanId = "66666666-6666-4666-8666-666666666666";
+    const payload = {
+      ...model,
+      media: {
+        ...model.media,
+        [orphanId]: {
+          kind: "image",
+          name: "ghost.png",
+          mime: "image/png",
+          plainBytes: 100,
+          cryptoFormat: 1,
+          chunkBytes: 1_048_576,
+          chunkCount: 1,
+          noncePrefix: "AAAAAAAAAAA",
+          fileKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        },
+      },
+    };
+    const referencedMediaIds = [
+      ...new Set(
+        payload.blocks.filter((block) => block.type === "media").map((block) => block.mediaId as string),
+      ),
+    ].sort();
+    // The wire contract requires encryptedRevision == current revision + 1, and
+    // the live client may save concurrently: re-read both before each attempt.
+    let put!: Response;
+    let revision = 0;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const head = await fetch("/api/v1/document", { credentials: "same-origin", cache: "no-store" });
+      const etag = head.headers.get("etag") ?? "";
+      const headData = (await head.json()) as { revision: number };
+      const mutationId = crypto.randomUUID();
+      const encryptedRevision = headData.revision + 1;
+      const { nonce, ciphertext } = await bridge.encryptDocument({
+        mutationId,
+        encryptedRevision,
+        formatVersion: 1,
+        keyVersion: 1,
+        document: payload,
+        documentJson: JSON.stringify(payload),
+      });
+      put = await fetch("/api/v1/document", {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json", "x-txt-request": "1", "if-match": etag },
+        body: JSON.stringify({
+          mutationId,
+          formatVersion: 1,
+          keyVersion: 1,
+          encryptedRevision,
+          nonce,
+          ciphertext,
+          referencedMediaIds,
+        }),
+      });
+      if (put.status === 200) {
+        revision = ((await put.json()) as { revision: number }).revision;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    return { status: put.status, revision };
+  });
+  expect(injected.status).toBe(200);
+  expect(injected.revision).toBeGreaterThan(0);
+
+  /**
+   * Decrypts the server copy and reports whether it still carries orphans.
+   * Polling this outcome (instead of page memory at a single instant) keeps the
+   * test independent of exactly when the repair save lands.
+   */
+  const serverCopyState = async (): Promise<string> =>
+    page.evaluate(async () => {
+      interface DebugWindow {
+        __txtDebug?: {
+          state: {
+            bridge: {
+              decryptDocument: (options: Record<string, unknown>) => Promise<unknown>;
+              lastDroppedMediaIds: string[];
+            } | null;
+          };
+        };
+      }
+      const bridge = (window as unknown as DebugWindow).__txtDebug?.state?.bridge ?? null;
+      const response = await fetch("/api/v1/document", { credentials: "same-origin", cache: "no-store" });
+      const data = (await response.json()) as {
+        mutationId: string;
+        encryptedRevision: number;
+        formatVersion: number;
+        keyVersion: number;
+        nonce: string;
+        ciphertext: string;
+      };
+      if (!bridge) return "no-bridge";
+      try {
+        await bridge.decryptDocument({
+          mutationId: data.mutationId,
+          encryptedRevision: data.encryptedRevision,
+          formatVersion: data.formatVersion,
+          keyVersion: data.keyVersion,
+          nonce: data.nonce,
+          ciphertext: data.ciphertext,
+        });
+        return bridge.lastDroppedMediaIds.length === 0 ? "clean" : "orphan";
+      } catch (error) {
+        return `error:${String(error).slice(0, 60)}`;
+      }
+    });
+
+  // Reload 1: the client drops the orphaned entry, opens the document, and
+  // re-saves the repaired model. Wait until the server copy itself comes back
+  // clean — that is the observable outcome of the repair.
+  await page.reload();
+  const repairGate = page.getByRole("button", { name: "パスキーで開く" });
+  if (await repairGate.isVisible().catch(() => false)) await repairGate.click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("修復テスト。", {
+    timeout: 20000,
+  });
+  await expect.poll(serverCopyState, { timeout: 30000 }).toBe("clean");
+
+  // Reload 2: the repair is persisted. The document opens with nothing left to
+  // drop, the content is intact, and the image bytes decrypt client-side.
+  await page.reload();
+  if (await repairGate.isVisible().catch(() => false)) await repairGate.click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("修復テスト。", {
+    timeout: 20000,
+  });
+  await expect.poll(serverCopyState, { timeout: 30000 }).toBe("clean");
+  await page.waitForFunction(
+    () => {
+      const img = document.querySelector("#editor-host img") as HTMLImageElement | null;
+      return !!img && img.naturalWidth > 0;
+    },
+    undefined,
+    { timeout: 45000 },
+  );
+});
+
 test("refreshes to the latest revision saved by another session", async ({ page, browser }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);

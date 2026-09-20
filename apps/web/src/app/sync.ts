@@ -14,7 +14,11 @@
  *   Auth failures and decrypt failures do not loop forever.
  */
 
-import { serializeDocument } from "../../../../packages/protocol/src/document.ts";
+import {
+  DocumentFormatError,
+  serializeDocument,
+  validateDocument,
+} from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { ApiRequestError, api } from "./api.ts";
 import type { DocumentResponse } from "./api.ts";
@@ -323,6 +327,13 @@ export class SyncEngine {
     mutationId: string;
     encryptedRevision: number;
   }): Promise<SavePayload> {
+    // Last line of defence: a document that fails validation must never be
+    // uploaded, because every client — including ones that cannot repair it —
+    // would refuse to open it afterwards (spec §8).
+    const issues = validateDocument(options.document);
+    if (issues.length > 0) {
+      throw new DocumentFormatError("document failed validation before save", issues);
+    }
     const json = serializeDocument(options.document);
     const { nonce, ciphertext } = await this.bridge.encryptDocument({
       mutationId: options.mutationId,
@@ -378,6 +389,12 @@ export class SyncEngine {
     // Decrypt failures and unknown formats are not network failures (§10.6).
     if ((error as Error).message?.includes("decrypt")) {
       this.callbacks.onState("decrypt-failed", "内容を開けません。データは変更していません。");
+      return;
+    }
+    if (error instanceof DocumentFormatError) {
+      // Refusing to save keeps the other devices readable; the local copy is
+      // preserved and a retry cannot help until the model is repaired.
+      this.callbacks.onState("local-only", "本文の整合性が取れないため保存できません。");
       return;
     }
     this.callbacks.onState("offline", "端末に保存済み・未同期");

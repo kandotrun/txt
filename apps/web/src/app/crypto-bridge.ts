@@ -20,6 +20,12 @@ export class CryptoBridge {
   private resolveUnlocked: (() => void) | null = null;
   private rejectUnlocked: ((reason: Error) => void) | null = null;
   private lockGeneration = 0;
+  /**
+   * Media IDs dropped while repairing the last decrypted document (spec §8).
+   * The load path re-saves the repaired model so every client sees a clean
+   * document; the list is informational only.
+   */
+  private lastDropped: string[] = [];
 
   constructor(workerUrl: string) {
     this.worker = new Worker(workerUrl, { type: "module", name: "txt-crypto" });
@@ -133,11 +139,17 @@ export class CryptoBridge {
     nonce: string;
     ciphertext: string;
   }): Promise<DocumentModel> {
-    const response = await this.request<{ document: DocumentModel }>({
+    const response = await this.request<{ document: DocumentModel; droppedMediaIds?: string[] }>({
       type: "decrypt-document",
       ...options,
     });
+    this.lastDropped = Array.isArray(response.droppedMediaIds) ? response.droppedMediaIds : [];
     return response.document;
+  }
+
+  /** Media entries the worker had to drop to open the last decrypted document. */
+  get lastDroppedMediaIds(): string[] {
+    return this.lastDropped;
   }
 
   async encryptChunk(options: {

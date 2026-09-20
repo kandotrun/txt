@@ -301,6 +301,65 @@ export function referencedMediaIds(doc: DocumentModel): string[] {
   return [...referencedMediaIdSet(doc.blocks)].sort();
 }
 
+/* ------------------------------------------------------------------ */
+/* Repair helpers (spec §8)                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Returns a copy holding only the media entries its blocks reference.
+ *
+ * The wire format forbids orphaned entries, so every serialization prunes
+ * them: an upload that finished after its insertion was undone/deleted, or an
+ * insertion removed from history, must never persist a dictionary entry.
+ */
+export function pruneUnreferencedMedia(doc: DocumentModel): DocumentModel {
+  const referenced = referencedMediaIdSet(doc.blocks);
+  const keys = Object.keys(doc.media);
+  if (keys.every((key) => referenced.has(key))) return doc;
+  const media: Record<string, MediaInfo> = {};
+  for (const key of keys) {
+    if (referenced.has(key)) media[key] = doc.media[key] as MediaInfo;
+  }
+  return { ...doc, media };
+}
+
+const ORPHAN_ISSUE = /^media\[".+"\]: entry is not referenced$/;
+
+/**
+ * Recovers a stored document whose only defect is unreferenced media entries.
+ *
+ * Dropping such an entry loses nothing: no block points at it. Any other
+ * problem returns null, because silently repairing unknown damage could
+ * destroy visible content — the caller must keep failing closed there.
+ */
+export function repairOrphanedMedia(
+  input: unknown,
+): { document: DocumentModel; dropped: string[] } | null {
+  const issues = validateDocument(input);
+  if (issues.length === 0) return { document: input as DocumentModel, dropped: [] };
+  if (!issues.every((issue) => ORPHAN_ISSUE.test(issue))) return null;
+  const source = input as DocumentModel;
+  const referenced = referencedMediaIdSet(source.blocks);
+  const media: Record<string, MediaInfo> = {};
+  const dropped: string[] = [];
+  for (const key of Object.keys(source.media)) {
+    if (referenced.has(key)) {
+      media[key] = source.media[key] as MediaInfo;
+    } else {
+      dropped.push(key);
+    }
+  }
+  const document: DocumentModel = {
+    schemaVersion: source.schemaVersion,
+    blocks: source.blocks,
+    media,
+  };
+  // The repaired model must be fully valid; otherwise the caller treats the
+  // document as unreadable exactly as before.
+  if (validateDocument(document).length > 0) return null;
+  return { document, dropped };
+}
+
 const KIND_LABELS: Record<MediaKind, string> = {
   image: "画像",
   video: "動画",

@@ -27,7 +27,7 @@ import { history, redo, undo } from "prosemirror-history";
 
 import { newId, SCHEMA_VERSION } from "../../../../packages/protocol/src/document.ts";
 import type { Block, DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
-import { insertMediaBlock } from "./document-blocks.ts";
+import { insertMediaAtCaret, insertMediaBlock } from "./document-blocks.ts";
 
 export const MEDIA_NODE = "media";
 
@@ -276,9 +276,14 @@ export class Editor {
    * Inserts a media node at the tracked position, ensuring editable text
    * blocks exist before and after it (spec §8).
    *
-   * The structural repair lives in `insertMediaBlock`, which is unit-tested as
-   * a pure function; this method only translates the result into a ProseMirror
-   * transaction.
+   * When the position resolves inside a text block (the normal case for a
+   * caret), that block is split at the caret offset: left keeps its ID, right
+   * gets a new one. Placing the media before the whole block instead is what
+   * sent every attachment to the top of the document.
+   *
+   * The structural repair lives in `insertMediaBlock` / `insertMediaAtCaret`,
+   * which are unit-tested as pure functions; this method only translates the
+   * result into a ProseMirror transaction.
    */
   insertMedia(mediaId: string, kind: string, position?: number): void {
     const { state } = this.view;
@@ -289,7 +294,7 @@ export class Editor {
 
     const size = state.doc.content.size;
     const clamped = Math.max(0, Math.min(position ?? state.selection.from, size));
-    const index = state.doc.resolve(clamped).index(0);
+    const $pos = state.doc.resolve(clamped);
 
     // Convert the current document to the shared block model, apply the rules,
     // then rebuild — this guarantees the invariants the wire format validates.
@@ -303,7 +308,14 @@ export class Editor {
       }
     });
 
-    const { blocks, mediaIndex } = insertMediaBlock(current, { mediaId, position: index });
+    const { blocks, mediaIndex } =
+      $pos.depth > 0 && $pos.parent.type.name === "paragraph"
+        ? insertMediaAtCaret(current, {
+            mediaId,
+            index: $pos.index(0),
+            offset: $pos.parentOffset,
+          })
+        : insertMediaBlock(current, { mediaId, position: $pos.index(0) });
     const nodes: PMNode[] = blocks.map((block) =>
       block.type === "text"
         ? textType.create(
