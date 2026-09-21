@@ -21,7 +21,7 @@ import {
 import { Editor } from "./editor.ts";
 import { BLOB_FALLBACK_MAX_BYTES, classify, fetchDecrypted, uploadFile } from "./media.ts";
 import type { MediaRejectedError } from "./media.ts";
-import { SyncEngine } from "./sync.ts";
+import { SyncEngine, normalizedEqual } from "./sync.ts";
 import type { SyncState } from "./sync.ts";
 import {
   addPasskey,
@@ -654,11 +654,24 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         const recovered = pruneUnreferencedMedia(
           JSON.parse(draft.documentJson) as DocumentModel,
         );
-        // The app state must carry the recovered media dictionary: the editor
-        // resolves node metadata through `state.document` (spec §10.6).
-        state.document = recovered;
-        editor.applyRemoteDocument(recovered);
-        sync.noteCommittedChange();
+        if (normalizedEqual(recovered, document)) {
+          // The draft matches what the server already holds (a leftover from a
+          // best-effort clear): drop it silently instead of re-saving it.
+          await clearDraft({
+            accountId: vault.accountId,
+            documentId: state.documentId,
+          });
+        } else {
+          // The app state must carry the recovered media dictionary: the editor
+          // resolves node metadata through `state.document` (spec §10.6).
+          state.document = recovered;
+          editor.applyRemoteDocument(recovered);
+          // Save from the base the draft was written against: if the server has
+          // moved past it, the save fails closed with 412 and the conflict
+          // dialog decides — never a silent overwrite (spec §10.4).
+          sync.setBaseFromDraft(draft.baseEtag);
+          sync.noteCommittedChange();
+        }
       } catch {
         toast("保存済みの下書きを読み込めませんでした。");
       }

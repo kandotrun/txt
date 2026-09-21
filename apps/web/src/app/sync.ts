@@ -545,19 +545,27 @@ export class SyncEngine {
         nonce: result.data.nonce,
         ciphertext: result.data.ciphertext,
       });
-      this.baseEtag = result.etag ?? this.baseEtag;
-      this.baseRevision = result.data.revision;
-
       if (this.dirty) {
         // Unsaved local edits exist: never replace them silently.
-        this.remoteCandidate = { document: remoteDocument, response: result.data, etag: result.etag ?? "" };
         if (normalizedEqual(this.callbacks.getDocument(), remoteDocument)) {
+          // The content already converged: adopt the newer base and stop.
+          this.baseEtag = result.etag ?? this.baseEtag;
+          this.baseRevision = result.data.revision;
           this.persistedGeneration = this.committedGeneration;
           this.dirty = false;
           this.callbacks.onState("saved");
+          return;
         }
+        // The remote moved while local edits were pending. Rebasing onto the
+        // new revision here would let this (possibly stale) local copy
+        // silently overwrite newer remote content — a lost update. Keep the
+        // old base instead: the next save fails closed with 412 and goes
+        // through the explicit conflict dialog (spec §10.4).
+        this.remoteCandidate = { document: remoteDocument, response: result.data, etag: result.etag ?? "" };
         return;
       }
+      this.baseEtag = result.etag ?? this.baseEtag;
+      this.baseRevision = result.data.revision;
       this.callbacks.applyRemote(remoteDocument, { fromAdoption: false });
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 401) {
@@ -578,6 +586,16 @@ export class SyncEngine {
     this.remoteCandidate = null;
     this.callbacks.onState("saved");
     return true;
+  }
+
+  /**
+   * Re-bases the next save onto the base a local draft was written against.
+   * If the server has moved past that base, the save fails closed with 412
+   * and the explicit conflict dialog runs (spec §10.4) instead of this copy
+   * silently overwriting newer remote content.
+   */
+  setBaseFromDraft(baseEtag: string | null): void {
+    if (baseEtag) this.baseEtag = baseEtag;
   }
 
   /** Saves the local contents over the fetched remote base. */

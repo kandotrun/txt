@@ -512,16 +512,23 @@ public actor SyncEngine {
             let result = try await api.document(etag: baseEtag)
             guard !result.notModified, let data = result.data else { return }
             let remoteDocument = try await decrypt(data)
-            baseEtag = result.etag
-            baseRevision = data.revision
             if dirty {
                 if normalizedEqual(callbacks.getDocument(), remoteDocument) {
                     persistedGeneration = committedGeneration
                     dirty = false
+                    baseEtag = result.etag
+                    baseRevision = data.revision
                     callbacks.onState(.saved)
                 }
+                // The remote moved while local edits were pending. Rebasing
+                // onto it here would let this (possibly stale) local copy
+                // silently overwrite newer remote content — a lost update.
+                // Keep the old base instead: the next save fails closed with
+                // 412 and goes through the explicit conflict dialog (spec §10.4).
                 return
             }
+            baseEtag = result.etag
+            baseRevision = data.revision
             callbacks.applyRemote(remoteDocument, false)
         } catch let error as TxtError {
             if case .api(401, _, _) = error {
