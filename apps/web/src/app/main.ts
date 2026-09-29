@@ -6,7 +6,6 @@
  */
 
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
-import { IDLE_LOCK_MS } from "../../../../packages/protocol/src/windows.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api, ApiRequestError } from "./api.ts";
@@ -89,8 +88,6 @@ interface AppState {
   document: DocumentModel;
   documentId: string;
   sessionGeneration: number;
-  lastActivity: number;
-  lockTimer: number | null;
   serviceWorkerReady: boolean;
   swGeneration: number;
   attaching: Map<string, AttachEntry>;
@@ -105,15 +102,11 @@ const state: AppState = {
   document: { schemaVersion: 1, blocks: [], media: {} },
   documentId: "",
   sessionGeneration: 0,
-  lastActivity: Date.now(),
-  lockTimer: null,
   serviceWorkerReady: false,
   swGeneration: 0,
   attaching: new Map(),
   objectUrls: new Map(),
 };
-
-const LOCK_AFTER_MS = IDLE_LOCK_MS;
 
 /* ------------------------------------------------------------------ */
 /* Gate rendering (spec §4.6)                                          */
@@ -527,7 +520,6 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       elements.editorHost,
       {
         onCommittedChange: () => {
-          state.lastActivity = Date.now();
           if (state.editor?.isComposing) {
             state.sync?.noteComposingChange();
             return;
@@ -687,7 +679,6 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   showApp();
   setSyncState("idle");
   editor.focus();
-  resetLockTimer();
   } catch (error) {
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
@@ -748,14 +739,6 @@ function syncServiceWorkerMedia(): void {
 /* Lock policy (spec §6.4)                                             */
 /* ------------------------------------------------------------------ */
 
-function resetLockTimer(): void {
-  state.lastActivity = Date.now();
-  if (state.lockTimer !== null) window.clearTimeout(state.lockTimer);
-  state.lockTimer = window.setTimeout(() => {
-    lockVault("一定時間操作がありませんでした。");
-  }, LOCK_AFTER_MS);
-}
-
 function lockVault(reason: string): void {
   if (!state.unlocked) return;
   if (state.editor && !state.editor.isSafePoint()) {
@@ -792,8 +775,8 @@ function lockVault(reason: string): void {
 
 /**
  * Explicit lock: drop the in-memory key AND the device-kept copy so the next
- * visit really requires a passkey (spec §6.4). Unlike the idle lock, this is a
- * deliberate user action, so nothing is retained.
+ * visit really requires a passkey (spec §6.4). Web has no inactivity lock:
+ * only an explicit user action ends the unlocked page's editing session.
  */
 function lockVaultForget(): void {
   const accountId = state.unlocked?.accountId;
@@ -1116,11 +1099,10 @@ elements.recoverySubmit.addEventListener("click", () => {
   void recoveryFlow();
 });
 
-window.addEventListener("pointerdown", resetLockTimer, { passive: true });
-window.addEventListener("keydown", resetLockTimer);
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) resetLockTimer();
-  else if (state.editor?.isSafePoint()) state.sync?.saveNow();
+  // Backgrounding only flushes safe input; keep the editor and keys intact.
+  // SyncEngine resumes fetching on visibility/focus/online (§10.2).
+  if (document.hidden && state.editor?.isSafePoint()) state.sync?.saveNow();
 });
 
 async function boot(): Promise<void> {

@@ -12,7 +12,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEVICE_KEEP_TTL_MS,
-  IDLE_LOCK_MS,
   SESSION_ABSOLUTE_TTL_MS,
   SESSION_IDLE_TTL_MS,
   STEPUP_TTL_MS,
@@ -32,11 +31,8 @@ describe("session and retention windows (spec §5.4, §6.4)", () => {
     expect(days(DEVICE_KEEP_TTL_MS)).toBe(30);
   });
 
-  it("still locks the in-memory key quickly", () => {
-    // The idle lock may stay short precisely because re-unlock is silent when
-    // device keeping is on.
-    expect(IDLE_LOCK_MS).toBe(5 * 60 * 1000);
-  });
+  // Web inactivity/visibility and explicit locking are browser behaviors,
+  // covered end to end in tests/e2e/inactivity.spec.ts (spec §6.4).
 
   it("keeps step-up re-authentication short", () => {
     // Sensitive operations must still require a recent ceremony: the retention

@@ -21,10 +21,3 @@ export const STEPUP_TTL_MS = 5 * 60 * 1000;
  * extended on every successful unlock; explicit lock and logout delete it.
  */
 export const DEVICE_KEEP_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-
-/**
- * Idle lock: how long the app may sit unattended before it drops the in-memory
- * VaultKey. With device keeping enabled the re-unlock is silent, so this can be
- * short without hurting the user (spec §6.4).
- */
-export const IDLE_LOCK_MS = 5 * 60 * 1000;
