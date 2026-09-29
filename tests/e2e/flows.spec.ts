@@ -669,8 +669,9 @@ test("deletes the account and clears local state", async ({ page }) => {
   await expect(page.getByText("アカウントを削除しますか")).toBeVisible();
   await page.getByRole("button", { name: "削除する" }).click();
 
-  // After deletion the session is gone: a fresh load shows the signed-out gate.
-  await page.waitForTimeout(2000);
+  // Wait for step-up, deletion, and the app's reload before navigating again.
+  // A fixed delay can cancel the ceremony on a slower local Worker.
+  await expect(page.getByRole("button", { name: "はじめて使う" })).toBeVisible({ timeout: 30000 });
   await page.goto(BASE);
   await expect(page.getByRole("button", { name: "はじめて使う" })).toBeVisible({ timeout: 20000 });
 });
