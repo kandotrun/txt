@@ -1,17 +1,29 @@
 /* txt.2-38.com — spec §4.2
  *
- * No card, no paper shadow, no fake Apple window chrome. The screen width is
- * used directly. Body text uses a system monospace stack with a Japanese
+ * "活字" (type): white page, ink-black type, one accent colour. The editing
+ * surface uses the screen width directly — no card, no paper shadow, no fake
+ * Apple window chrome. Body text uses a system monospace stack with a Japanese
  * fallback, base 16 CSS px, line-height 1.6.
+ *
+ * Motion rule (spec §4.2): animations live only on layers outside the editing
+ * surface (gate, intro, dialog, toast, hints). Nothing inside or wrapping
+ * `.editor` is transformed or has its opacity animated — both are IME hazards.
  */
 
 :root {
   --bg: #ffffff;
-  --fg: #1c1c1e;
+  --surface: #ffffff;
+  --fg: #111111;
   --muted: #6b6b70;
-  --line: #d9d9de;
+  --line: #e5e5ea;
+  --tint: #f2f2f4;
+  --hover: rgb(17 17 17 / 6%);
   --accent: #0a84ff;
-  --danger: #c0392b;
+  --danger: #d70015;
+  --on-danger: #ffffff;
+  --shadow: 0 24px 64px rgb(0 0 0 / 16%), 0 2px 8px rgb(0 0 0 / 6%);
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 1.45, 0.4, 1);
   --pad-inline: 16px;
   --footer-height: 56px;
 }
@@ -30,12 +42,17 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #111114;
-    --fg: #e7e7ea;
+    --bg: #0b0b0c;
+    --surface: #161618;
+    --fg: #f2f2f4;
     --muted: #9a9aa2;
-    --line: #2c2c31;
+    --line: #2a2a2e;
+    --tint: #1d1d20;
+    --hover: rgb(242 242 244 / 8%);
     --accent: #4c9aff;
-    --danger: #ff6b5e;
+    --danger: #ff6961;
+    --on-danger: #0b0b0c;
+    --shadow: 0 24px 64px rgb(0 0 0 / 60%), 0 0 0 1px #2a2a2e;
   }
 }
 
@@ -68,6 +85,7 @@ body {
   font-size: 16px;
   line-height: 1.6;
   -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
 }
 
 .visually-hidden {
@@ -83,10 +101,129 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 12px 22px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    transform 120ms var(--ease-out),
+    opacity 160ms ease,
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease;
+}
+
+.button:hover {
+  opacity: 0.86;
+}
+
+.button:active {
+  transform: scale(0.98);
+}
+
+.button.secondary {
+  background: transparent;
+  border-color: var(--line);
+  color: var(--fg);
+}
+
+.button.ghost {
+  background: transparent;
+  color: var(--muted);
+  padding-inline: 14px;
+}
+
+.button.secondary:hover,
+.button.ghost:hover {
+  opacity: 1;
+  background: var(--hover);
+  color: var(--fg);
+}
+
+.button.danger {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
+.button.compact {
+  min-height: 36px;
+  padding: 6px 14px;
+  font-size: 14px;
+}
+
+.button .icon {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.button:focus-visible,
+.icon-button:focus-visible,
+.menu-item:focus-visible,
+.coach-ok:focus-visible,
+.gate-details summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color 160ms ease,
+    transform 120ms var(--ease-out);
+}
+
+.icon-button:hover {
+  background: var(--hover);
+}
+
+.icon-button:active {
+  transform: scale(0.94);
+}
+
+.icon-button svg {
+  width: 22px;
+  height: 22px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Editor                                                              */
 /* ------------------------------------------------------------------ */
 
 #app {
+  position: relative;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -127,7 +264,7 @@ body {
   display: block;
   max-width: 100%;
   height: auto;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 .editor .txt-media video,
@@ -138,7 +275,7 @@ body {
 
 .editor .txt-media-placeholder {
   border: 1px dashed var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 12px;
   color: var(--muted);
   font-size: 14px;
@@ -149,6 +286,19 @@ body {
   outline-offset: 2px;
 }
 
+/* Empty-state hint: aligned with the first line of the editor, outside it. */
+.empty-hint {
+  position: absolute;
+  top: 24px;
+  left: var(--pad-inline);
+  right: var(--pad-inline);
+  margin: 0;
+  color: var(--muted);
+  pointer-events: none;
+  user-select: none;
+  animation: fade-in 360ms var(--ease-out) both;
+}
+
 /* ------------------------------------------------------------------ */
 /* Controls                                                            */
 /* ------------------------------------------------------------------ */
@@ -156,62 +306,79 @@ body {
 .controls {
   position: fixed;
   inset: auto 0 0 0;
+  z-index: 5;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px var(--pad-inline);
+  padding: 6px calc(var(--pad-inline) - 10px);
   padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(12px);
+  background: color-mix(in srgb, var(--bg) 86%, transparent);
+  backdrop-filter: saturate(1.4) blur(14px);
   border-top: 1px solid var(--line);
   min-height: var(--footer-height);
 }
 
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 44px;
-  height: 44px;
-  padding: 0;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--fg);
-  cursor: pointer;
-}
-
-.icon-button:hover {
-  background: color-mix(in srgb, var(--fg) 10%, transparent);
-}
-
-.icon-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.icon-button svg {
-  width: 22px;
-  height: 22px;
-}
-
 .sync-status {
   flex: 1;
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 1.2em;
   font-size: 13px;
   color: var(--muted);
-  min-height: 1.2em;
 }
 
-.sync-status[data-state="error"],
-.sync-status[data-state="conflict"] {
-  color: var(--danger);
+/* A shape next to the words, so state is never carried by colour alone. */
+.sync-status::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.sync-status:empty::before {
+  display: none;
+}
+
+.sync-status[data-state="saving"]::before {
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.sync-status[data-state="saved"] {
+  animation: fade-in 240ms var(--ease-out) both;
+}
+
+.sync-status[data-state="saved"]::before {
+  background: var(--accent);
+}
+
+.sync-status[data-state="local-only"]::before,
+.sync-status[data-state="offline"]::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 .sync-status[data-state="offline"] {
-  color: var(--muted);
   font-weight: 600;
+}
+
+.sync-status[data-state="error"],
+.sync-status[data-state="conflict"],
+.sync-status[data-state="auth-expired"],
+.sync-status[data-state="decrypt-failed"] {
+  color: var(--danger);
+}
+
+.sync-status[data-state="error"]::before,
+.sync-status[data-state="conflict"]::before,
+.sync-status[data-state="auth-expired"]::before,
+.sync-status[data-state="decrypt-failed"]::before {
+  border-radius: 1px;
+  transform: rotate(45deg);
 }
 
 .attach-progress {
@@ -219,6 +386,7 @@ body {
   left: var(--pad-inline);
   right: var(--pad-inline);
   bottom: calc(var(--footer-height) + env(safe-area-inset-bottom, 0px) + 8px);
+  z-index: 6;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -229,93 +397,226 @@ body {
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
   font-size: 13px;
+  animation: rise-in 280ms var(--ease-out) both;
 }
 
 .attach-item progress {
   flex: 1;
-  height: 6px;
+  height: 4px;
+  accent-color: var(--accent);
 }
 
 .attach-item button {
   border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--danger);
   cursor: pointer;
   font: inherit;
-  padding: 4px 6px;
+  padding: 4px 10px;
   min-height: 32px;
+}
+
+/* ------------------------------------------------------------------ */
+/* One-time hints (non-modal)                                          */
+/* ------------------------------------------------------------------ */
+
+.coach {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--footer-height) + env(safe-area-inset-bottom, 0px) + 12px);
+  height: 0;
+  z-index: 7;
+  pointer-events: none;
+}
+
+.coach.is-leaving {
+  animation: fade-out 180ms ease-in forwards;
+}
+
+.coach-bubble {
+  position: absolute;
+  bottom: 0;
+  max-width: min(260px, calc(50vw - var(--pad-inline) - 8px));
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 13px;
+  line-height: 1.55;
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  animation: coach-in 460ms var(--ease-spring) 200ms both;
+}
+
+.coach.is-leaving .coach-bubble {
+  pointer-events: none;
+}
+
+/* Arrows point at the centre of the 44px controls below. */
+.coach-bubble.start {
+  left: var(--pad-inline);
+  transform-origin: 12px 100%;
+}
+
+.coach-bubble.end {
+  right: var(--pad-inline);
+  transform-origin: calc(100% - 12px) 100%;
+  animation-delay: 380ms;
+}
+
+.coach-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+
+.coach-bubble.start::after {
+  left: 6px;
+}
+
+.coach-bubble.end::after {
+  right: 6px;
+}
+
+.coach-bubble p {
+  margin: 0;
+}
+
+.coach-ok {
+  display: block;
+  margin: 8px 0 0 auto;
+  min-height: 32px;
+  padding: 4px 14px;
+  border: none;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 /* ------------------------------------------------------------------ */
 /* Gate                                                                */
 /* ------------------------------------------------------------------ */
 
+/* A fixed layer: when the editor opens it fades out on top of it. */
 .gate {
-  min-height: 100dvh;
+  position: fixed;
+  inset: 0;
+  z-index: 20;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px var(--pad-inline);
+  padding: max(24px, env(safe-area-inset-top)) var(--pad-inline) max(24px, env(safe-area-inset-bottom));
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.gate.is-leaving {
+  animation: gate-leave 320ms var(--ease-out) forwards;
+  pointer-events: none;
 }
 
 .gate-card {
-  width: min(560px, 100%);
+  width: min(520px, 100%);
+  /* `margin: auto` centres without cutting off the top when content overflows. */
+  margin: auto;
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
+.gate-card > * {
+  animation: rise-in 520ms var(--ease-out) both;
+}
+
+.gate-card > .wordmark {
+  animation: none;
+}
+
+.gate-card > .gate-title {
+  animation-delay: 120ms;
+}
+
+.gate-card > .gate-body {
+  animation-delay: 200ms;
+}
+
+.gate-card > .gate-actions {
+  animation-delay: 280ms;
+}
+
+.gate-card > .gate-details,
+.gate-card > .gate-footnote {
+  animation-delay: 360ms;
+}
+
+/* Wordmark: "txt" types in, the blue period lands, the caret keeps blinking. */
+.wordmark {
+  display: flex;
+  align-items: baseline;
+  margin: 0 0 12px;
+  color: var(--fg);
+  font-size: clamp(76px, 24vw, 132px);
+  font-weight: 800;
+  line-height: 0.9;
+  user-select: none;
+}
+
+.wordmark-text {
+  display: inline-block;
+  animation: type-in 480ms steps(3, jump-end) 150ms both;
+}
+
+.wordmark-dot {
+  display: inline-block;
+  margin-left: -0.08em;
+  color: var(--accent);
+  animation: dot-drop 560ms var(--ease-spring) 660ms both;
+}
+
+.wordmark-caret {
+  display: inline-block;
+  width: 0.09em;
+  height: 0.72em;
+  margin-left: 0.04em;
+  background: var(--fg);
+  animation: caret-blink 1.06s steps(1) infinite;
+}
+
 .gate-title {
-  font-size: 20px;
-  font-weight: 600;
   margin: 0;
-  line-height: 1.5;
+  font-size: clamp(20px, 5.4vw, 26px);
+  font-weight: 700;
+  line-height: 1.45;
 }
 
 .gate-body {
   margin: 0;
   color: var(--muted);
   font-size: 14px;
+  line-height: 1.75;
 }
 
 .gate-actions {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.button {
-  font: inherit;
-  font-size: 15px;
-  min-height: 44px;
-  padding: 10px 16px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  background: var(--accent);
-  color: #fff;
-  cursor: pointer;
-}
-
-.button.secondary {
-  background: transparent;
-  border-color: var(--line);
-  color: var(--fg);
-}
-
-.button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  margin-top: 6px;
 }
 
 .gate-details {
@@ -325,8 +626,36 @@ body {
 }
 
 .gate-details summary {
-  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
   color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  border-radius: 6px;
+}
+
+.gate-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.gate-details summary::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 180ms var(--ease-out);
+}
+
+.gate-details[open] summary::before {
+  transform: rotate(45deg);
+}
+
+.gate-details summary:hover {
+  color: var(--fg);
 }
 
 .field {
@@ -339,12 +668,18 @@ body {
 .field textarea {
   font: inherit;
   font-size: 13px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 12px;
   background: transparent;
   color: var(--fg);
   resize: vertical;
+  transition: border-color 160ms ease;
+}
+
+.field textarea:focus {
+  outline: none;
+  border-color: var(--accent);
 }
 
 .gate-footnote {
@@ -359,29 +694,358 @@ body {
 }
 
 /* ------------------------------------------------------------------ */
-/* Dialog & toast                                                      */
+/* Intro                                                               */
 /* ------------------------------------------------------------------ */
 
-.dialog {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 20px;
-  max-width: min(560px, calc(100vw - 32px));
+.intro {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  padding: max(12px, env(safe-area-inset-top)) var(--pad-inline) max(20px, env(safe-area-inset-bottom));
   background: var(--bg);
   color: var(--fg);
+  overflow-y: auto;
+}
+
+.intro.is-entering {
+  animation: fade-in 260ms var(--ease-out) both;
+}
+
+.intro.is-leaving {
+  animation: fade-out 220ms ease-in forwards;
+  pointer-events: none;
+}
+
+.intro-top,
+.intro-stage,
+.intro-nav {
+  width: min(560px, 100%);
+  margin-inline: auto;
+}
+
+.intro-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+}
+
+.intro-progress {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.intro-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 18px;
+  padding: 24px 0;
+}
+
+.intro-stage.is-entering-forward {
+  animation: slide-forward 380ms var(--ease-out) both;
+}
+
+.intro-stage.is-entering-back {
+  animation: slide-back 380ms var(--ease-out) both;
+}
+
+.intro-title {
+  margin: 0;
+  font-size: clamp(38px, 10.5vw, 64px);
+  font-weight: 800;
+  line-height: 1.08;
+  outline: none;
+}
+
+.intro-title .title-dot {
+  color: var(--accent);
+}
+
+.intro-body {
+  margin: 0;
+  max-width: 32em;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.8;
+}
+
+.intro-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.intro-nav .button {
+  min-width: 112px;
+}
+
+.intro-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.intro-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+  transition:
+    width 280ms var(--ease-out),
+    background-color 280ms ease;
+}
+
+.intro-dots span.is-current {
+  width: 22px;
+  background: var(--fg);
+}
+
+/* Slide art: typographic, built from text and a few shapes. */
+.intro-art {
+  display: flex;
+  align-items: center;
+  min-height: 136px;
+}
+
+.art {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 15px;
+}
+
+.art-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(280px, 100%);
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  animation: rise-in 420ms var(--ease-out) both;
+}
+
+.art-line {
+  display: block;
+  width: max-content;
+  animation: type-in 700ms steps(7, jump-end) both;
+}
+
+.art-line.l1 {
+  animation-delay: 300ms;
+}
+
+.art-line.l2 {
+  animation-timing-function: steps(6, jump-end);
+  animation-delay: 1050ms;
+}
+
+.art-line.l3 {
+  animation-delay: 1800ms;
+}
+
+.art-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1.1em;
+  margin-top: 2px;
+  background: var(--accent);
+  animation: caret-blink 1s steps(1) infinite;
+}
+
+.art-password {
+  position: relative;
+  color: var(--muted);
+  font-size: 28px;
+  letter-spacing: 0.12em;
+  animation: password-out 1500ms ease both;
+}
+
+.art-password::after {
+  content: "";
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  top: 52%;
+  height: 2px;
+  background: var(--danger);
+  transform: scaleX(0);
+  transform-origin: left;
+  animation: strike 380ms var(--ease-out) 500ms both;
+}
+
+.art-key,
+.art-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 18px;
+}
+
+.art-key {
+  width: 68px;
+  height: 68px;
+  background: var(--fg);
+  color: var(--bg);
+  animation: pop-in 560ms var(--ease-spring) 1000ms both;
+}
+
+.art-key .icon {
+  width: 34px;
+  height: 34px;
+}
+
+.art-plain,
+.art-cipher {
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 16px;
+}
+
+.art-plain {
+  border: 1px solid var(--line);
+  animation: rise-in 400ms var(--ease-out) both;
+}
+
+.art-arrow {
+  color: var(--accent);
+  font-size: 20px;
+  animation: nudge 900ms var(--ease-out) 300ms both;
+}
+
+.art-cipher {
+  min-width: 11ch;
+  text-align: center;
+  background: var(--fg);
+  color: var(--bg);
+  animation: rise-in 400ms var(--ease-out) 200ms both;
+}
+
+.art-cipher.is-sealed {
+  animation: seal 480ms var(--ease-spring) both;
+}
+
+.art-key-box {
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: var(--tint);
+  animation: rise-in 400ms var(--ease-out) both;
+}
+
+.art-recovery-key {
+  display: inline-block;
+  font-family: inherit;
+  font-size: 15px;
+  animation: type-in 1100ms steps(14, jump-end) 250ms both;
+}
+
+.art-copy {
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--line);
+  color: var(--fg);
+  animation: pop-in 520ms var(--ease-spring) 1400ms both;
+}
+
+.art-copy .icon {
+  width: 22px;
+  height: 22px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dialog, menu & toast                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Enter via @starting-style and exit via allow-discrete transitions: the
+ * close/answer logic in main.ts is untouched, and browsers without support
+ * simply open and close instantly.
+ */
+.dialog {
+  width: min(460px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100dvh - 32px);
+  padding: 22px;
+  border: none;
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--fg);
+  box-shadow: var(--shadow);
+  overflow: auto;
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
+  transition:
+    opacity 200ms var(--ease-out),
+    transform 200ms var(--ease-out),
+    overlay 200ms allow-discrete,
+    display 200ms allow-discrete;
+}
+
+.dialog[open] {
+  opacity: 1;
+  transform: none;
+}
+
+@starting-style {
+  .dialog[open] {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
 }
 
 .dialog::backdrop {
-  background: rgb(0 0 0 / 40%);
+  background: rgb(0 0 0 / 0%);
+  transition:
+    background-color 200ms ease,
+    overlay 200ms allow-discrete,
+    display 200ms allow-discrete;
+}
+
+.dialog[open]::backdrop {
+  background: rgb(0 0 0 / 38%);
+}
+
+@starting-style {
+  .dialog[open]::backdrop {
+    background: rgb(0 0 0 / 0%);
+  }
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
 .dialog-title {
-  margin: 0 0 12px;
-  font-size: 17px;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.dialog-close {
+  margin: -10px -12px -10px 0;
+  color: var(--muted);
+}
+
+.dialog-close svg {
+  width: 20px;
+  height: 20px;
 }
 
 .dialog-body {
   font-size: 14px;
+  line-height: 1.7;
   color: var(--fg);
   display: flex;
   flex-direction: column;
@@ -391,65 +1055,346 @@ body {
 .dialog-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 20px;
+  gap: 10px;
+  margin-top: 22px;
 }
 
 .dialog-actions .button {
-  flex: 1;
-  min-width: 140px;
+  flex: 1 1 140px;
 }
 
 .dialog pre {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--tint);
+  font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
-  font-size: 12px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 10px;
-  margin: 0;
   max-height: 200px;
   overflow: auto;
+}
+
+.recovery-lead {
+  margin: 0;
+  font-weight: 600;
+}
+
+.recovery-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.dialog pre.recovery-key {
+  font-size: 14px;
+  line-height: 1.7;
+  user-select: all;
+}
+
+.recovery-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recovery-tools .button {
+  flex: 1 1 140px;
+}
+
+/* 「その他」: a list of rows, bottom sheet on narrow screens (§4.6). */
+.dialog.dialog--menu {
+  width: min(380px, calc(100vw - 32px));
+  padding: 14px 10px 10px;
+}
+
+.dialog--menu .dialog-header {
+  padding: 0 6px 0 12px;
+  margin-bottom: 2px;
+}
+
+.dialog--menu .dialog-title {
+  font-size: 16px;
+}
+
+.dialog--menu .dialog-body {
+  padding: 0 12px 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.dialog--menu .dialog-actions {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 15px;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 140ms ease;
+}
+
+.menu-item:hover {
+  background: var(--hover);
+}
+
+.menu-item .icon {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--muted);
+}
+
+.menu-item.danger,
+.menu-item.danger .icon {
+  color: var(--danger);
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 6px 12px;
+  background: var(--line);
+}
+
+.dialog--menu[open] .dialog-actions > * {
+  animation: rise-in 300ms var(--ease-out) both;
+}
+
+.dialog--menu[open] .dialog-actions > :nth-child(2) { animation-delay: 20ms; }
+.dialog--menu[open] .dialog-actions > :nth-child(3) { animation-delay: 40ms; }
+.dialog--menu[open] .dialog-actions > :nth-child(4) { animation-delay: 60ms; }
+.dialog--menu[open] .dialog-actions > :nth-child(5) { animation-delay: 80ms; }
+.dialog--menu[open] .dialog-actions > :nth-child(6) { animation-delay: 100ms; }
+.dialog--menu[open] .dialog-actions > :nth-child(n + 7) { animation-delay: 120ms; }
+
+@media (max-width: 719px) {
+  .dialog.dialog--menu {
+    width: 100%;
+    max-width: 100%;
+    margin: auto 0 0;
+    border-radius: 22px 22px 0 0;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    transform: translateY(100%);
+  }
+
+  .dialog.dialog--menu[open] {
+    transform: none;
+  }
+
+  @starting-style {
+    .dialog.dialog--menu[open] {
+      transform: translateY(100%);
+    }
+  }
 }
 
 .toast {
   position: fixed;
   left: 50%;
   bottom: calc(var(--footer-height) + env(safe-area-inset-bottom, 0px) + 16px);
-  transform: translateX(-50%);
+  translate: -50% 0;
+  z-index: 40;
+  max-width: calc(100vw - 32px);
+  padding: 9px 16px;
+  border-radius: 999px;
   background: var(--fg);
   color: var(--bg);
-  padding: 8px 14px;
-  border-radius: 999px;
   font-size: 13px;
-  max-width: calc(100vw - 32px);
+  box-shadow: var(--shadow);
 }
 
-/* Menus are native popovers so IME focus is never stolen by custom widgets. */
-.menu {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 6px;
-  background: var(--bg);
-  color: var(--fg);
-  min-width: 220px;
+.toast.is-entering {
+  animation: toast-in 300ms var(--ease-spring) both;
 }
 
-.menu button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  font-size: 14px;
-  padding: 10px 12px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  min-height: 40px;
+.toast.is-leaving {
+  animation: toast-out 200ms ease-in forwards;
+  pointer-events: none;
 }
 
-.menu button:hover {
-  background: color-mix(in srgb, var(--fg) 8%, transparent);
+/* ------------------------------------------------------------------ */
+/* Keyframes                                                           */
+/* ------------------------------------------------------------------ */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+/* Reveals one character per step; vertical insets leave room for glyphs. */
+@keyframes type-in {
+  from {
+    clip-path: inset(-0.3em 100% -0.3em 0);
+  }
+  to {
+    clip-path: inset(-0.3em 0 -0.3em 0);
+  }
+}
+
+@keyframes dot-drop {
+  from {
+    opacity: 0;
+    transform: translateY(-0.6em) scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes gate-leave {
+  to {
+    opacity: 0;
+    transform: scale(1.015);
+  }
+}
+
+@keyframes slide-forward {
+  from {
+    opacity: 0;
+    transform: translateX(28px);
+  }
+}
+
+@keyframes slide-back {
+  from {
+    opacity: 0;
+    transform: translateX(-28px);
+  }
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes coach-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.9);
+  }
+}
+
+@keyframes password-out {
+  0%,
+  55% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.3;
+  }
+}
+
+@keyframes strike {
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.6) rotate(-12deg);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes nudge {
+  0% {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+  60% {
+    opacity: 1;
+    transform: translateX(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes seal {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+}
+
+@keyframes toast-out {
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Reduced motion (spec §4.2, §4.5): final states, no movement          */
+/* ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  ::backdrop {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
 }

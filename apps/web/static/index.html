@@ -17,9 +17,18 @@
       bottom edge above the safe area / software keyboard.
     -->
     <main id="app" hidden>
+      <!--
+        Empty-state hint (spec §4.1). It sits outside the editing DOM and is
+        toggled only at IME safe points, so ProseMirror never sees it.
+      -->
+      <p id="empty-hint" class="empty-hint" aria-hidden="true" hidden>ここから書く。自動で保存されます。</p>
+
       <div id="editor-host" class="editor" role="textbox" aria-multiline="true" aria-label="テキスト"></div>
 
       <div id="attach-progress" class="attach-progress" hidden aria-live="polite"></div>
+
+      <!-- One-time hints after registration (spec §4.6 新規作成). Non-modal. -->
+      <div id="coach" class="coach" aria-live="polite" hidden></div>
 
       <footer class="controls" id="controls" hidden>
         <button
@@ -67,9 +76,16 @@
       />
     </main>
 
-    <!-- Gate screens: 未登録/未認証, 鍵なし, PRF未対応, ロック中など (§4.6) -->
+    <!--
+      Gate screens: 未登録/未認証, 鍵なし, PRF未対応, ロック中など (§4.6). The gate is
+      a fixed layer: when the editor opens it fades out on top of it, so the
+      editing surface itself is never animated (§4.2).
+    -->
     <section id="gate" class="gate">
       <div class="gate-card">
+        <div class="wordmark" aria-hidden="true">
+          <span class="wordmark-text">txt</span><span class="wordmark-dot">.</span><span class="wordmark-caret"></span>
+        </div>
         <h1 class="gate-title" id="gate-title">メールアドレスなしで、1枚のテキストを。</h1>
         <p class="gate-body" id="gate-body">
           パスキーで暗号化された、あなた専用の1枚です。本文と添付は端末で暗号化され、
@@ -88,9 +104,34 @@
       </div>
     </section>
 
+    <!-- Intro slides (§4.6 紹介): before registration and from 「その他」→「使い方」. -->
+    <section id="intro" class="intro" role="dialog" aria-modal="true" aria-labelledby="intro-title" hidden>
+      <header class="intro-top">
+        <span id="intro-progress" class="intro-progress"></span>
+        <button id="intro-skip" class="button ghost compact" type="button">スキップ</button>
+      </header>
+      <div id="intro-stage" class="intro-stage" aria-live="polite">
+        <div id="intro-art" class="intro-art" aria-hidden="true"></div>
+        <h2 id="intro-title" class="intro-title" tabindex="-1"></h2>
+        <p id="intro-body" class="intro-body"></p>
+      </div>
+      <footer class="intro-nav">
+        <button id="intro-back" class="button ghost" type="button"></button>
+        <div id="intro-dots" class="intro-dots" aria-hidden="true"></div>
+        <button id="intro-next" class="button" type="button"></button>
+      </footer>
+    </section>
+
     <!-- ダイアログ: 競合解決・セキュリティ設定・確認など (§4.6, §10.4) -->
     <dialog id="dialog" class="dialog">
-      <h2 id="dialog-title" class="dialog-title"></h2>
+      <header class="dialog-header">
+        <h2 id="dialog-title" class="dialog-title"></h2>
+        <button id="dialog-close" class="icon-button dialog-close" type="button" title="閉じる" aria-label="閉じる" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+          </svg>
+        </button>
+      </header>
       <div id="dialog-body" class="dialog-body"></div>
       <div id="dialog-actions" class="dialog-actions"></div>
     </dialog>
