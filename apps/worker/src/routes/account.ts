@@ -25,7 +25,7 @@ routes.get("/sessions", async (c) => {
   const auth = await requireAuth(c);
   const rows = await c.env.DB.prepare(
     `SELECT sid, client_kind, scope, created_at, absolute_expires_at, idle_expires_at, stepup_at
-       FROM sessions WHERE account_id = ?1 AND revoked_at IS NULL
+       FROM sessions WHERE account_id = ?1 AND client_kind = 'web' AND revoked_at IS NULL
       ORDER BY created_at DESC`,
   )
     .bind(auth.accountId)
@@ -54,7 +54,7 @@ routes.delete("/sessions/:id", async (c) => {
     .bind(nowMs(), sid, auth.accountId)
     .run();
   if ((updated.meta.changes ?? 0) !== 1) throw notFound("session not found");
-  if (sid === auth.session.sid && auth.via === "cookie") {
+  if (sid === auth.session.sid) {
     c.header("set-cookie", clearSessionCookie(c.env));
   }
   return c.json({ ok: true });
@@ -104,7 +104,7 @@ routes.delete("/account", async (c) => {
     c.env.DB.prepare(`DELETE FROM recovery WHERE account_id = ?1`).bind(auth.accountId),
   ]);
 
-  if (auth.via === "cookie") c.header("set-cookie", clearSessionCookie(c.env));
+  c.header("set-cookie", clearSessionCookie(c.env));
 
   // Physical cleanup of ciphertext is performed asynchronously by the
   // scheduled handler so the response is not blocked by object deletion.

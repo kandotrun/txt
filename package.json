@@ -15,6 +15,7 @@
     "test:unit": "vitest run --config vitest.config.ts",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:protocol": "vitest run --config vitest.config.ts tests/protocol",
+    "build": "npm run build:web",
     "build:web": "npm run build --workspace @txt/web",
     "brand:images": "node scripts/brand-images.mjs",
     "dev": "bash scripts/dev.sh",

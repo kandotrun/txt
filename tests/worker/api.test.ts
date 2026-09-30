@@ -291,10 +291,10 @@ interface RegisteredAccount {
 let registrationSequence = 0;
 
 /** Runs register/options + register/verify and returns the pending session. */
-async function registerAccount(): Promise<RegisteredAccount> {
+async function registerAccount(clientHeaders: Record<string, string> = webHeaders): Promise<RegisteredAccount> {
   // 各テストの合成クライアントを分離し、実運用の登録制限は変更しない。
   const registrationHeaders = {
-    ...webHeaders,
+    ...clientHeaders,
     "cf-connecting-ip": `2001:db8::${(++registrationSequence).toString(16)}`,
   };
   const optionsResponse = await postJson("/api/v1/auth/register/options", {}, registrationHeaders);
@@ -314,6 +314,7 @@ async function registerAccount(): Promise<RegisteredAccount> {
 
   const verifyResponse = await postJson("/api/v1/auth/register/verify", { response }, registrationHeaders);
   expect(verifyResponse.status).toBe(200);
+  expect(await verifyResponse.json()).not.toHaveProperty("token");
   const cookie = cookieFrom(verifyResponse);
   expect(cookie).toBeTruthy();
   return {
@@ -1274,6 +1275,132 @@ describe("login and sessions", () => {
       headers: { cookie: account.cookie },
     });
     expect(after.status).toBe(401);
+  });
+});
+
+
+
+describe("Web-only contract", () => {
+  // アプリ関連付けは残存bindingがあっても配信せず、SPAへ渡さない。
+  it.each(["GET", "HEAD"])("does not serve application association for %s", async (method) => {
+    let assetCalls = 0;
+    const response = await worker.fetch(new Request(`${BASE}/.well-known/apple-app-site-association`, { method }), {
+      ...(env as Env),
+      TxtTeamId: "LEGACYTEAM",
+      TxtIosBundleId: "legacy.ios",
+      TxtMacosBundleId: "legacy.mac",
+      ASSETS: { fetch() { assetCalls++; return Promise.resolve(new Response("SPA")); } } as unknown as Fetcher,
+    } as Env, createExecutionContext());
+    expect.soft(response.status).toBe(404);
+    expect.soft(response.headers.get("cache-control")).toBe("no-store");
+    expect(assetCalls).toBe(0);
+  });
+
+  it("registers through cookie-only WebAuthn despite a legacy app User-Agent", async () => {
+    const account = await registerAccount({ "content-type": "application/json", "user-agent": "txt-ios/1.0" });
+    const session = await SELF.fetch(`${BASE}/api/v1/session`, { headers: { cookie: account.cookie } });
+    expect(session.status).toBe(200);
+    expect(await session.json()).toMatchObject({ clientKind: "web", via: "cookie" });
+  });
+
+  it("logs in through cookie-only WebAuthn despite a legacy app User-Agent", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const headers = { "content-type": "application/json", "user-agent": "txt-macos/1.0" };
+    const options = await postJson("/api/v1/auth/login/options", {}, headers);
+    const body = await options.json() as { options: { challenge: string } };
+    const response = await assertionResponse(account.credential, {
+      challenge: body.options.challenge, rpId: "txt.2-38.com", userHandle: account.userHandle,
+    });
+    const verify = await postJson("/api/v1/auth/login/verify", { response }, headers);
+    expect.soft(verify.status).toBe(200);
+    expect.soft(await verify.json()).not.toHaveProperty("token");
+    expect(cookieFrom(verify)).toBeTruthy();
+  });
+
+  it("starts recovery with a cookie and never returns a raw session token", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const recoveryAuth = randomBytes(32);
+    await TEST_ENV.DB.prepare(`UPDATE recovery SET auth_hash32 = ?2 WHERE account_id = ?1`)
+      .bind(account.accountId, recoveryAuth).run();
+    const response = await postJson("/api/v1/recovery/start", {
+      accountId: account.accountId, recoveryAuth: b64url(recoveryAuth),
+    }, { "content-type": "application/json" });
+    expect.soft(response.status).toBe(200);
+    expect.soft(await response.json()).not.toHaveProperty("token");
+    expect(cookieFrom(response)).toBeTruthy();
+  });
+
+  // 既存Webセッションの生値であってもBearer経路は読み書きとも認可しない。
+  it.each([undefined, BASE, "https://evil.example"])("rejects Bearer reads and writes with origin %s", async (origin) => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const before = await getDocument(account);
+    const snapshot = await before.json();
+    const headers: Record<string, string> = { authorization: `Bearer ${account.cookie.split("=")[1]}` };
+    if (origin !== undefined) headers.origin = origin;
+    const read = await SELF.fetch(`${BASE}/api/v1/document`, { headers });
+    expect.soft(read.status).toBe(401);
+    const write = await SELF.fetch(`${BASE}/api/v1/document`, {
+      method: "PUT", headers: { ...headers, "content-type": "application/json", "if-match": before.headers.get("etag")! },
+      body: JSON.stringify(documentPutBody()),
+    });
+    expect.soft(write.status).toBe(401);
+    expect(await (await getDocument(account)).json()).toEqual(snapshot);
+  });
+
+  it("rejects cookie writes without Origin and preserves the document", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const before = await getDocument(account);
+    const snapshot = await before.json();
+    const response = await SELF.fetch(`${BASE}/api/v1/document`, {
+      method: "PUT", headers: { cookie: account.cookie, "content-type": "application/json", "x-txt-request": "1", "if-match": before.headers.get("etag")! },
+      body: JSON.stringify(documentPutBody()),
+    });
+    expect(response.status).toBe(403);
+    expect(await (await getDocument(account)).json()).toEqual(snapshot);
+  });
+
+  it("lists only browser sessions while leaving legacy rows intact", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const originalSid = (await TEST_ENV.DB.prepare(`SELECT sid FROM sessions WHERE account_id = ?1`)
+      .bind(account.accountId).first<{ sid: string }>())!.sid;
+    await TEST_ENV.DB.prepare(`UPDATE sessions SET client_kind = 'native' WHERE sid = ?1`).bind(originalSid).run();
+    const { issueSession } = await import("../../apps/worker/src/auth/sessions.ts");
+    const browserSession = await issueSession(env as Env, { accountId: account.accountId, clientKind: "web", scope: "active", authEpoch: 0 });
+    const response = await SELF.fetch(`${BASE}/api/v1/sessions`, { headers: { cookie: `__Host-txt_session=${browserSession.token}` } });
+    expect(response.status).toBe(200);
+    const body = await response.json() as { sessions: Array<{ sid: string; clientKind: string }> };
+    expect(body.sessions.map((session) => session.sid)).toEqual([browserSession.sid]);
+    expect(body.sessions[0]!.clientKind).toBe("web");
+    expect(await TEST_ENV.DB.prepare(`SELECT client_kind FROM sessions WHERE sid = ?1`).bind(originalSid)
+      .first()).toMatchObject({ client_kind: "native" });
+  });
+
+  it("does not accept a legacy non-Web session via a cookie", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    await TEST_ENV.DB.prepare(`UPDATE sessions SET client_kind = 'native' WHERE account_id = ?1`)
+      .bind(account.accountId).run();
+    const read = await SELF.fetch(`${BASE}/api/v1/session`, { headers: { cookie: account.cookie } });
+    expect(read.status).toBe(401);
+  });
+
+  it("rejects an in-flight legacy non-Web WebAuthn challenge", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const options = await postJson("/api/v1/auth/login/options", {});
+    const body = await options.json() as { options: { challenge: string } };
+    await TEST_ENV.DB.prepare(`UPDATE challenges SET client_kind = 'native' WHERE purpose = 'login'`).run();
+    const response = await assertionResponse(account.credential, {
+      challenge: body.options.challenge, rpId: "txt.2-38.com", userHandle: account.userHandle,
+    });
+    const verify = await postJson("/api/v1/auth/login/verify", { response });
+    expect(verify.status).toBe(400);
+    expect(cookieFrom(verify)).toBeUndefined();
   });
 });
 

@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 
 import type { AppBindings } from "../context.ts";
-import { clientKindFor, enforceRateLimit, clientBucketKey, getAuth, requireAuth } from "../context.ts";
+import { enforceRateLimit, clientBucketKey, getAuth, requireAuth } from "../context.ts";
 import type { Env } from "../types.ts";
 import { badRequest, conflict, notFound, unauthorized } from "../errors.ts";
 import { nowMs, randomBytes, readJson, uuid } from "../util.ts";
@@ -57,7 +57,7 @@ register.post("/register/options", async (c) => {
   await enforceRateLimit(c, { bucketKey, limit: 30 * rateLimitScale(c.env), windowMs: 60 * 60 * 1000 });
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
-  const clientKind = clientKindFor(c);
+  const clientKind = "web";
 
   if (c.env.REGISTRATION_MODE === "closed") {
     throw conflict("registration is closed", "REGISTRATION_CLOSED");
@@ -151,7 +151,7 @@ register.post("/register/verify", async (c) => {
     .first<{ auth_epoch: number }>();
   if (!account) throw notFound("account not found");
 
-  const clientKind = challenge.client_kind === "native" ? "native" : "web";
+  const clientKind = "web";
   const session = await issueSession(c.env, {
     accountId: challenge.account_id,
     clientKind,
@@ -159,20 +159,11 @@ register.post("/register/verify", async (c) => {
     authEpoch: account.auth_epoch,
   });
 
-  if (clientKind === "web") {
-    c.header("set-cookie", sessionCookie(session.token, c.env));
-    return c.json({
-      accountId: challenge.account_id,
-      credentialId: verified.credentialId,
-      scope: "pending",
-      expiresAt: session.expiresAt,
-    });
-  }
+  c.header("set-cookie", sessionCookie(session.token, c.env));
   return c.json({
     accountId: challenge.account_id,
     credentialId: verified.credentialId,
     scope: "pending",
-    token: session.token,
     expiresAt: session.expiresAt,
   });
 });
@@ -183,7 +174,7 @@ register.post("/login/options", async (c) => {
   await enforceRateLimit(c, { bucketKey, limit: 120 * rateLimitScale(c.env), windowMs: 60 * 60 * 1000 });
 
   await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024).catch(() => ({}));
-  const clientKind = clientKindFor(c);
+  const clientKind = "web";
   const options = await buildLoginOptions(c.env, {});
   const binding = await bindingHash(c.req.raw, "login");
   await storeChallenge(c.env, { purpose: "login", challenge: options.challenge, clientKind, binding });
@@ -232,7 +223,7 @@ register.post("/login/verify", async (c) => {
   if (!account) throw unauthorized("account unavailable");
   if (account.status === "deleting") throw unauthorized("account is being deleted");
 
-  const clientKind = clientKindFor(c);
+  const clientKind = "web";
   const scope = account.status === "pending" ? "pending" : "active";
   const session = await issueSession(c.env, {
     accountId: owner,
@@ -241,20 +232,11 @@ register.post("/login/verify", async (c) => {
     authEpoch: account.auth_epoch,
   });
 
-  if (clientKind === "web") {
-    c.header("set-cookie", sessionCookie(session.token, c.env));
-    return c.json({
-      accountId: owner,
-      credentialId,
-      scope,
-      expiresAt: session.expiresAt,
-    });
-  }
+  c.header("set-cookie", sessionCookie(session.token, c.env));
   return c.json({
     accountId: owner,
     credentialId,
     scope,
-    token: session.token,
     expiresAt: session.expiresAt,
   });
 });
@@ -386,7 +368,7 @@ sessionRoutes.delete("/session", async (c) => {
   await c.env.DB.prepare(`UPDATE sessions SET revoked_at = ?1 WHERE sid = ?2`)
     .bind(nowMs(), auth.session.sid)
     .run();
-  if (auth.via === "cookie") c.header("set-cookie", clearSessionCookie(c.env));
+  c.header("set-cookie", clearSessionCookie(c.env));
   return c.json({ ok: true });
 });
 

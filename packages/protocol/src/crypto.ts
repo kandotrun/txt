@@ -1,11 +1,10 @@
 /**
- * Cryptographic contract shared by Web (Web Crypto) and Swift (CryptoKit)
+ * Cryptographic contract for Web clients (Web Crypto)
  * (spec §6.2, §6.3, §7.1, §11.2).
  *
  * AES-256-GCM, HKDF-SHA256, SHA-256. 12-byte nonces, 16-byte tags. Binary JSON
  * fields are padding-free base64url. Ciphertext fields are `ciphertext||tag`
- * concatenated, with the nonce in a separate field. CryptoKit's combined
- * representation must never be passed to the Web side unprocessed.
+ * concatenated, with the nonce in a separate field. This byte format is stable.
  */
 
 import { encode, utf8, uuidToBytes } from "./encode.ts";

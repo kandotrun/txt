@@ -1,16 +1,16 @@
 ## 1. 目的・位置付け・優先順位
 
-公開URL `https://txt.2-38.com/` を開くと、自分専用の1枚のテキストを読み書きできるアプリを作る。タイトル、文書一覧、フォルダー、文字装飾、変更履歴を持たず、画像・動画・音声だけを本文中に挿入できる。本文と添付は自動保存し、同じ利用者のWeb・iOS・macOS間で同期する。
+公開URL `https://txt.2-38.com/` を開くと、自分専用の1枚のテキストを読み書きできるアプリを作る。タイトル、文書一覧、フォルダー、文字装飾、変更履歴を持たず、画像・動画・音声だけを本文中に挿入できる。本文と添付は自動保存し、同じ利用者のデスクトップ・スマートフォンのブラウザー間で同期する。
 
-最初にWebを公開し、その後SwiftによるネイティブiOS・macOSアプリを、参加済みの個人Apple Developer Programアカウントで公開する。ネイティブ版をWebViewで包んだWebアプリにしない。
+提供形態はWebのみとする。デスクトップ・スマートフォンのブラウザーから利用し、ネイティブアプリは提供・開発しない。レスポンシブUI、Apple端末のブラウザー、WebAuthn/PRF、メディアService Worker、Apple-touch icon、OGP、Web Shareは継続する。
 
-仕様版: 1.2。更新日: 2026-09-30。本書1ファイルを実装基準とする。リポジトリの従来の統合仕様、先行する設計改善案、日本語IMEを必須とする追加要件を統合した。Cloudflare Access、特定メールドメイン制限、Worker側の本文復号、R2 SSE-Cを主たる暗号化とする旧案は採用しない。
+仕様版: 1.3（Web-only）。更新日: 2026-09-30。本書1ファイルを実装基準とする。リポジトリの従来の統合仕様、先行する設計改善案、日本語IMEを必須とする追加要件を統合した。Cloudflare Access、特定メールドメイン制限、Worker側の本文復号、R2 SSE-Cを主たる暗号化とする旧案は採用しない。
 
 本書の「必須」「禁止」「受け入れ条件」は実装上の契約である。数値、UI配置、暗号コンテナー、状態遷移は本アプリの設計判断で、引用資料が一律に推奨する値ではない。公式APIの根拠は末尾に記載する。仕様の完成と、アプリの実装・実機試験・セキュリティ監査の完了は区別する。
 
 優先順位は、入力とデータを失わないこと、認証・暗号化の境界を守ること、画面と操作を単純にすること、配信サイズの順とする。依存ゼロやバンドル容量目標のためにIME、Undo、同期の正しさを犠牲にしない。
 
-特に、日本語IMEで日常的に入力することを前提とする。Web/Swift間のPRF相互運用、IMEと非同期処理の共存、E2EE動画のシーク再生を先行検証し、合格前に対応済みと宣伝しない。
+特に、日本語IMEで日常的に入力することを前提とする。ブラウザーとパスキー保存先のPRF互換性、IMEと非同期処理の共存、E2EE動画のシーク再生を先行検証し、合格前に対応済みと宣伝しない。
 
 ## 2. 採用する全体構成
 
@@ -25,13 +25,11 @@
 | 暗号化 | PRF由来の鍵で独立したマスター鍵を包む、クライアント側E2EE |
 | 復旧 | 独立した復旧キー、追加登録した対応パスキー |
 | Web | HTML/CSS/JavaScript + 必要最小限のProseMirror |
-| iOS | SwiftUI + UIKit/TextKitの編集面 + AVFoundation |
-| macOS | SwiftUI + AppKit/TextKitの編集面 + AVFoundation |
-| ネイティブ共通部分 | Swift Packageによるモデル・暗号・API・同期処理 |
+| 対応端末 | デスクトップ・スマートフォンのブラウザー（iPhone Safariを含む） |
 | 保存・同期 | 条件付きHTTP更新、短周期ポーリング、同一ブラウザー内通知 |
 | 履歴 | サーバーの旧版・履歴UIは作らない。現在の編集セッション内Undoは提供する |
 
-「個人としてリリース」は開発者の名義を意味し、利用者を開発者本人や特定メールドメインに限定しない。一般の利用者もパスキーで作成でき、各アカウントが非共有の1枚を持つ。料金、販売地域、正式ストア名は公開準備で決定する。
+「個人としてリリース」は開発者の名義を意味し、利用者を開発者本人や特定メールドメインに限定しない。一般の利用者もパスキーで作成でき、各アカウントが非共有の1枚を持つ。料金と提供地域は公開準備で決定する。
 
 Cloudflare Access、`@2-38.com`制限、Access JWT検証はアプリの認証に使用しない。1PasswordへのOAuthログインやApple Accountのソーシャルログインを追加するわけでもない。
 
@@ -53,9 +51,9 @@ IMEが処理していないとき、メディアに隣接する最初のBackspac
 
 添付中も本文を編集・保存できる。挿入位置と順序は選択時に確保し、完了順に並べ替えない。取消済み添付を遅い完了通知で復活させない。文字入力で既存プレイヤーを作り直さず、再生位置を保持する。
 
-## 4. Web・iOS・macOSのUI設計
+## 4. WebのUI設計
 
-### 4.1 共通
+### 4.1 基本方針
 
 常設するアプリ操作は「添付」「その他」の2つだけ。本文タイトル、アプリロゴ、大きなヘッダー、サイドバー、タブバー、保存ボタン、装飾バーを置かない。同期成功は短時間表示して消し、失敗・未同期・競合は解決するまで表示する。色だけで状態を伝えない。
 
@@ -90,57 +88,9 @@ Webの外観は「活字」を基調とする。認証・紹介画面では等�
 
 動きは認証画面、紹介、ダイアログ、メニュー、トースト、案内などの編集面以外の層に限る。編集面とその祖先要素にtransformやopacityのアニメーションを掛けない。認証画面から編集面への切り替えは、編集面を先に表示し、その上に重ねた認証画面を消して行う。アニメーションはCSSで記述し、インラインスタイルを使わない（§14）。`prefers-reduced-motion`では動きを止め、最終状態を表示する。
 
-### 4.3 iOS
+### 4.5 Webのアクセシビリティ
 
-```text
-┌─────────────────────────┐
-│      OSステータスバー   │
-│              [添付] […] │ ← 標準toolbar、タイトルなし
-│                         │
-│  ここから書く。         │
-│                         │
-│  ［画像・標準プレイヤー］│
-│                         │
-│  続きの文章。           │
-│                         │
-│  必要時だけ同期状態     │
-│─────────────────────────│
-│  OSキーボード・変換候補 │
-└─────────────────────────┘
-```
-
-SwiftUIの標準toolbar/sheet/menuを使い、本文は`UIViewRepresentable`経由の`UITextView`とTextKitを使う。メディアは`NSTextAttachment`と対応View Provider等で実装し、プレイヤーはmediaIdで管理する。`TextEditor`のみで全文要件を満たせるとは仮定しない。[S7][S29]
-
-右上の`paperclip`と`ellipsis`から操作する。起動時にキーボードを強制表示せず、本文タップで入力を開始する。本文はDynamic Typeのbody相当・等幅デザイン、日本語はシステムフォールバック。意味的な色を使い、文字サイズを固定しない。
-
-写真はPhotosPicker、ファイルはfileImporter等の標準選択を使う。初版に撮影・録音機能はないため、不要なカメラ・マイク・全写真アクセスを要求しない。OSの音声入力は通常の文字入力として扱い、アプリ独自の録音機能と混同しない。
-
-### 4.4 macOS
-
-```text
-メニューバー: txt / ファイル / 編集 / ウインドウ / ヘルプ
-┌─────────────────────────────────────────┐
-│ OSウィンドウボタン           [添付] […]│
-│                                         │
-│  ここから普通に書く。                   │
-│                                         │
-│  ［本文内のメディア］                   │
-│                                         │
-│  続きの文章。                           │
-└─────────────────────────────────────────┘
-```
-
-SwiftUIのWindowと`NSViewRepresentable`経由の`NSTextView`/TextKitを使う。標準ウィンドウボタン、統合toolbar、メニューバー、スクロール、コンテキストメニューを利用し、iPhone風UIやWebView主体にしない。
-
-初期サイズ900×680 pt、最小400×320 ptを目安とする。本文タイトルは表示せず、ウィンドウのアクセシビリティ名は「テキスト」。本文をタイトルやDockへ転記しない。設定は標準Settingsシーンと`⌘,`で開く。
-
-コピー、貼り付け、選択、Undo/Redoは標準操作に合わせる。`⌘S`は安全な確定済み内容の即時保存要求とし、名前や保存場所を尋ねない。IME中は要求を保留し、強制確定しない。「新規文書」「別名で保存」「文書を開く」は提供しない。複数ウィンドウも同じ1枚を扱う。
-
-### 4.5 Appleデザインシステムとアクセシビリティ
-
-標準toolbar、sheet、menu、picker、SF Symbols、Dynamic Type、意味的な色を優先する。Liquid Glassは対応OSの標準部品に任せ、本文全面をガラス化したり独自ぼかしで模倣したりしない。古い対応OSではそのOSの標準外観を使う。[S8][S9]
-
-VoiceOver、キーボード、文字拡大、コントラスト、透明度低減、視差効果低減に対応する。ネイティブ操作領域は44 ptを基本目標とし、翻訳や文字拡大でボタンが切れないようにする。同期成功を毎回読み上げず、エラー通知もIME候補の操作やフォーカスを奪わない。
+VoiceOver等のスクリーンリーダー、キーボード、文字拡大、コントラスト、透明度低減、視差効果低減に対応する。操作領域は44×44 CSS px以上を目標とし、翻訳や文字拡大でボタンが切れないようにする。同期成功を毎回読み上げず、エラー通知もIME候補の操作やフォーカスを奪わない。
 
 ### 4.6 状態別UI
 
@@ -174,7 +124,7 @@ accountIdはUUID、userHandleは32バイト乱数。メール、電話、氏名�
 
 ### 5.2 登録・認証
 
-WebはWebAuthn、ネイティブはAuthenticationServices。サーバーは`@simplewebauthn/server`を第一候補とし、Workersでの実行互換性を試験してlockfileで固定する。署名・CBOR・FIDO検証を独自実装しない。[S2]
+ブラウザーはWebAuthnを使う。サーバーは`@simplewebauthn/server`を第一候補とし、Workersでの実行互換性を試験してlockfileで固定する。署名・CBOR・FIDO検証を独自実装しない。[S2]
 
 `residentKey: required`、`userVerification: required`、`attestation: none`を基本とする。保存先を狭める`authenticatorAttachment: platform`固定は行わない。ログインは原則空のallowCredentialsによる発見可能な資格情報を使う。
 
@@ -182,7 +132,7 @@ challengeは32バイト以上の乱数、期限5分、1回限り。登録・ロ�
 
 challenge、type、RP ID hash、許可Origin、署名、UP/UV、userHandleとcredentialの所有者対応を検証する。同期パスキーのcounter=0を一律に拒否せず、backupフラグ等をライブラリーの検証規則に沿って扱う。[S1]
 
-WebのOriginは`https://txt.2-38.com`のみ。ネイティブのclientDataJSONも実機の正当な経路をもとに同じRPへ厳密に結び付ける。Origin検証の無効化・ワイルドカードで対処しない。開発/検証環境は別RP・別データとする。
+WebのOriginは`https://txt.2-38.com`のみ。clientDataJSONを同じRPへ厳密に結び付ける。Origin検証の無効化・ワイルドカードで対処しない。開発/検証環境は別RP・別データとする。
 
 ### 5.3 初回の原子的な確定
 
@@ -196,17 +146,17 @@ PRF非対応しか使えない環境では新規登録を完了させない。�
 
 パスキーはログインと解除時に使い、保存ごとに生体認証を求めない。通常APIは256bit以上の不透明セッショントークンで認可し、D1にはSHA-256ハッシュだけを保存する。
 
-Webは`__Host-txt_session`のSecure、HttpOnly、SameSite=Strict、Path=/ Cookieを使い、Domain属性を付けない。ネイティブはKeychainのBearerトークンをURLSessionで送る。WebへBearerを返したりlocalStorageへ保存したりしない。
+Webは`__Host-txt_session`のSecure、HttpOnly、SameSite=Strict、Path=/ Cookieを使い、Domain属性を付けない。セッションはCookie認証のみとし、Bearer認証は受け付けず、レスポンスJSONに生セッショントークンを返さない。既存の非Webセッションやchallengeは利用できない。既存Webセッション、DBスキーマ、暗号形式は維持する。
 
 初期期限は絶対45日・無操作30日。CookieのMax-Ageも同じ絶対期限に合わせる。失効とaccountのauth_epochをサーバーで確認する。機密操作は5分以内のstep-up再認証を要求する。セッション期限と端末内の復号鍵保持期限は別である。
 
-Cookie認証の書き込みは厳密なOriginと`X-Txt-Request: 1`を検証し、CORSで他Originを許可しない。Originのないネイティブ要求は検証済みnativeセッションのBearer経路で扱い、任意の`X-Client`でCSRFを迂回させない。CookieとBearerの混在・所有者不一致は拒否する。認証前ceremonyにもクライアント束縛とレート制限を適用する。
+Cookie認証の書き込みは厳密なOriginと`X-Txt-Request: 1`を検証し、CORSで他Originを許可しない。Originのない認証済み書き込みとAuthorizationヘッダーによる認証は拒否し、任意の`X-Client`やUser-AgentでCSRFを迂回させない。認証前ceremonyにもクライアント束縛とレート制限を適用する。
 
 ## 6. パスキーを使うE2EE
 
 ### 6.1 鍵の構成
 
-署名値、公開鍵、credential IDを暗号鍵にしない。PRFの秘密出力からKEKを導出し、独立した32バイト乱数のVaultKeyを包む。[S1][S3][S4]
+署名値、公開鍵、credential IDを暗号鍵にしない。PRFの秘密出力からKEKを導出し、独立した32バイト乱数のVaultKeyを包む。[S1][S4]
 
 ```text
 パスキーAのPRF → HKDF → KEK-A → VaultKeyのラップA
@@ -233,17 +183,17 @@ wrapAAD = Encode("txt/v1/vault-key", formatVersion, keyVersion,
 wrappedVaultKey = AES-256-GCM(KEK, randomNonce12, VaultKey, wrapAAD)
 ```
 
-公開入力は資格情報の選択前にも分かる固定値とし、デプロイごとに変えない。WebAuthn内部のPRF入力変換をアプリで重ねて行わない。同じ入力バイトでWeb/Swift双方から同じ資格情報を使った相互復号を試験する。
+公開入力は資格情報の選択前にも分かる固定値とし、デプロイごとに変えない。WebAuthn内部のPRF入力変換をアプリで重ねて行わない。同じ入力バイトと資格情報による再解除・復号を対応ブラウザーとパスキー保存先の組で試験する。
 
-発見可能ログインでは`prf.eval`を使う。空のallowCredentialsに`evalByCredential`を組み合わせない。資格情報別入力を使う将来拡張は別途契約化する。PRFのenabled/isSupportedだけで成功とせず、実出力・ラップ・再解除を確認する。[S1][S3][S5]
+発見可能ログインでは`prf.eval`を使う。空のallowCredentialsに`evalByCredential`を組み合わせない。資格情報別入力を使う将来拡張は別途契約化する。PRFのenabled/isSupportedだけで成功とせず、実出力・ラップ・再解除を確認する。[S1][S5]
 
-PRF出力、KEK、VaultKeyを送信・記録しない。`credential.toJSON()`、`getClientExtensionResults()`、ライブラリーの応答を丸ごとPOSTせず、署名検証に必要なフィールドだけのDTOを作る。PRF resultsを除外する。W3C仕様もtoJSONにPRF resultsが含まれ得ることを明示するため、ネットワーク試験を必須とする。Swiftの送信DTOにもPRF由来の鍵を含めない。[S1]
+PRF出力、KEK、VaultKeyを送信・記録しない。`credential.toJSON()`、`getClientExtensionResults()`、ライブラリーの応答を丸ごとPOSTせず、署名検証に必要なフィールドだけのDTOを作る。PRF resultsを除外する。W3C仕様もtoJSONにPRF resultsが含まれ得ることを明示するため、ネットワーク試験を必須とする。[S1]
 
-### 6.3 Web/Swift共通の暗号契約
+### 6.3 Webの暗号契約
 
-Web CryptoとCryptoKitのAES-256-GCM、HKDF-SHA256、SHA-256を使う。nonceは12バイト、認証タグは16バイト、バイナリーのJSON表現はパディングなしbase64url。暗号文フィールドはciphertextとtagの連結で、nonceは別フィールドにする。CryptoKitのcombined表現を無加工でWebへ渡さない。[S10][S11]
+Web CryptoのAES-256-GCM、HKDF-SHA256、SHA-256を使う。nonceは12バイト、認証タグは16バイト、バイナリーのJSON表現はパディングなしbase64url。暗号文フィールドはciphertextとtagの連結で、nonceは別フィールドにする。nonce、ciphertext、tagの配置を変えない。[S10]
 
-`Encode`は各フィールドのバイト列にuint32 big-endianの長さを前置して連結する。文字列はUTF-8、UUIDは16バイト、credential IDは元のバイト列、整数はuint64 big-endian。JSONの辞書順、ロケール依存文字列、Swiftのハッシュ順を使わない。
+`Encode`は各フィールドのバイト列にuint32 big-endianの長さを前置して連結する。文字列はUTF-8、UUIDは16バイト、credential IDは元のバイト列、整数はuint64 big-endian。JSONの辞書順やロケール依存文字列を使わない。
 
 ```text
 snapshotKey = HKDF-SHA256(VaultKey, mutationIdの16バイト,
@@ -257,23 +207,19 @@ documentAAD = Encode("txt/v1/document", formatVersion, keyVersion,
 
 syncEpochはサーバー復旧時に変更可能な同期識別子で、既存暗号文のAADを後から書き換える用途には使わない。復元後も暗号化時のencryptedRevisionを保存し、初回取得で再照合する。
 
-端末内ドラフトは保存ごとの新しいdraftIdとnonce、`txt/v1/draft-key`/`txt/v1/draft`の別用途名で鍵導出・AADを分離する。AADにはaccountId、documentId、tab/sceneIdを含める。
+端末内ドラフトは保存ごとの新しいdraftIdとnonce、`txt/v1/draft-key`/`txt/v1/draft`の別用途名で鍵導出・AADを分離する。AADにはaccountId、documentId、tabIdを含める。
 
-このコンテナーはアプリ固有の設計で、監査済み標準形式ではない。実装で各バイトを固定し、Web/Swift共通テストベクトル、改変試験、独立したセキュリティレビューを公開条件とする。復号・未知形式・AAD不一致の失敗で空文書へ置き換えない。
+このコンテナーはアプリ固有の設計で、監査済み標準形式ではない。実装で各バイトを固定し、固定した暗号テストベクトル、改変試験、独立したセキュリティレビューを公開条件とする。復号・未知形式・AAD不一致の失敗で空文書へ置き換えない。
 
 ### 6.4 端末内の鍵とロック
 
 WebのVaultKeyは解除中メモリーだけに置く。再読み込み後はパスキーまたは復旧キーで再解除する。ただし端末保持（既定30日）が有効な場合は、端末固有の非抽出CryptoKey（`extractable: false`、IndexedDBへ保存）で包んだVaultKeyを端末内に保存し、保持期限内はパスキーなしで再解除してよい。保持期限は解除のたびに延長し、明示ロック・ログアウト・保持解除操作では包んだ鍵と端末鍵を削除する。IndexedDBには暗号化キャッシュ、端末保持の包み鍵、最新未同期ドラフトだけを置き、平文や鍵をlocalStorage/sessionStorageへ置かない。
 
-ネイティブはVaultKeyを端末限定のKeychain項目として保存し、`WhenUnlockedThisDeviceOnly`とuserPresenceを基本候補とする。生体認証・パスコード・利用可能性を実機確認する。一般のAES対称鍵をそのままSecure Enclave内で使用できるとは説明しない。トークンは鍵と別項目にする。[S12]
-
 Webは無操作時間や非表示/バックグラウンド滞在時間だけを理由に自動ロックしない。一度解除したページは、放置・バックグラウンド復帰・オフライン中も本文、未同期入力、キャレットを保ち、再読み込みやパスキー操作なしで編集を続けられる。端末保持が使えない場合も、開いているページの解除状態は維持する。サーバーのセッション期限・失効判定と、再読み込み時の端末保持期限は変更しない。認証失効時は未同期入力を保持し、同期に再認証を要求する。利用者が「今すぐロック」またはログアウトを選んだ場合は保護し、時間経過・前面復帰・再読み込みによって自動解除してはならない。WebはOSロックを常に検出できると仮定せず、離席時の保護には手動ロックまたは端末の画面ロックを使う。
 
-ネイティブは非表示/バックグラウンド移行から5分で再解除を要求する。タイマー停止を前提に復帰時の時刻で判定する。明示ロック・OSから通知された保護データ利用不可では即座に保護する。端末保持が有効な場合、バックグラウンド復帰の再解除は端末保持の包み鍵で行ってよく、パスキーの再要求を必須としない。その場合も平文応答・Object URL・復号バッファーは保持期限と別に再確立する。
+ロック時は可能な範囲で暗号化退避し、画面を覆い、再生・進行中の平文応答を止め、Object URLをrevokeし、画面・Web Worker・Service Worker・キューの鍵参照を切る。ログアウトではトークン・保存済み解除鍵も削除する。
 
-ロック時は可能な範囲で暗号化退避し、画面を覆い、再生・進行中の平文応答を止め、Object URLをrevokeし、画面・Web Worker・Service Worker・キューの鍵参照を切る。ネイティブは非アクティブ時のアプリ切替画像も覆う。ログアウトではトークン・保存済み解除鍵も削除する。
-
-IMEのためにロック期限を無期限延長しない。ロックによる入力中断は通常同期と区別し、未確定分を確定済みとして送らない。未同期暗号文は所有者別に隔離して保持し、本人が再認証したときだけ復旧可能にする。退避失敗を隠さない。OS終了直前の入力保存や物理メモリーの完全消去は保証しない。
+明示ロック・認証失効による保護をIMEのために回避しない。ロックによる入力中断は通常同期と区別し、未確定分を確定済みとして送らない。未同期暗号文は所有者別に隔離して保持し、本人が再認証したときだけ復旧可能にする。退避失敗を隠さない。OS終了直前の入力保存や物理メモリーの完全消去は保証しない。
 
 ### 6.5 保護範囲
 
@@ -320,7 +266,7 @@ TLS上で送信するのは導出済みRecoveryAuthとaccountId等だけで、Re
 
 ## 8. 共通文書モデルと変換規則
 
-WebのProseMirror JSON、HTML、NSAttributedStringアーカイブを通信形式にしない。各クライアントは次の共通JSONへ変換し、全体を暗号化する。
+WebのProseMirror JSONやHTMLを通信形式にしない。ブラウザーは次の共通JSONへ変換し、全体を暗号化する。
 
 ```json
 {
@@ -360,7 +306,7 @@ text内の改行はLFという文字で、ブロック境界やメディア表�
 
 ### 8.1 文字位置
 
-保存本文はUTF-8、編集アダプターのテキスト位置は`blockId + UTF-16 offset + affinity`を基本とする。ProseMirrorの文書位置をそのまま保存せず、Swiftの`String.count`をNSRangeへ直接使用しない。UTF-16とString.Indexを明示変換する。
+保存本文はUTF-8、編集アダプターのテキスト位置は`blockId + UTF-16 offset + affinity`を基本とする。ProseMirrorの文書位置をそのまま保存せず、保存モデルへの変換でUTF-16位置を明示的に扱う。
 
 キャレット・削除範囲をサロゲートペア、結合文字、異体字セレクター、ZWJ絵文字の途中へ独自に設定しない。通常の移動・削除は編集エンジン/OSへ委ねる。本文に入力されたU+FFFCと、attachment属性を持つ内部メディア位置を区別する。
 
@@ -370,7 +316,7 @@ text内の改行はLFという文字で、ブロック境界やメディア表�
 
 各編集面は`idle → composing → settling → idle`の入力状態を持つ。composingは未確定文字列が存在する状態、settlingは確定/取消後の最終入力と編集エンジンの反映を待つ状態である。これとは別に、ロック、未保存、転送中、競合を管理する。
 
-編集中のエンジン状態と、同期へ渡せる確定済みスナップショットを分離する。IME中もProseMirrorのトランザクションとTextKitの入力処理を継続させる。止めるのは、未確定分の同期、新しい全文の外部適用、破壊的な正規化、アプリ独自のメディア挿入等であり、エディターの入力処理そのものではない。
+編集中のエンジン状態と、同期へ渡せる確定済みスナップショットを分離する。IME中もProseMirrorのトランザクションとブラウザーの入力処理を継続させる。止めるのは、未確定分の同期、新しい全文の外部適用、破壊的な正規化、アプリ独自のメディア挿入等であり、エディターの入力処理そのものではない。
 
 composition開始時に直前の確定済み状態を保持し、通常の新規保存スケジュールを保留する。開始前に送信済みの安全なスナップショットの完了は受け取れるが、その応答で編集中の本文や未保存状態を置き換えない。
 
@@ -404,21 +350,7 @@ inputが必ずcompositionendの後に1回だけ来る、keyupが必ず来る、�
 
 貼り付け/ドロップのPlaintext化はエンジンの入力経路で行い、HTMLを直接挿入しない。未確定文字があるときのファイル挿入やカスタム置換は安全点まで保留し、位置を追跡する。入力確定を促すためだけにfocus/blurを呼ばない。
 
-Webやネイティブの自動リンク、スマート引用符、スマートダッシュ等、アプリ側で制御可能な自動置換はPlaintext仕様に合わせて無効にする。日本語IME自体の予測・ライブ変換・ユーザー辞書をアプリで無効化しない。OSによる候補確定・音声入力の置換も通常の入力として受け取る。
-
-### 9.5 iOS/macOS: TextKitとSwiftUIの接続
-
-iOSは`markedTextRange != nil`、macOSは`hasMarkedText()`とmarkedRangeを使って未確定状態を観測する。通知の途中だけで確定と判断せず、最終変更後に次のMainActor実行機会で再確認する。marked textの有無を見ずに一定時間後に確定扱いしない。[S27][S28]
-
-UITextView/NSTextViewとCoordinatorの同一性を維持する。`updateUIView`/`updateNSView`で、Binding変更のたびにtext/attributedText/textStorage全体を代入しない。`.id(text)`等で編集ビューを作り直さない。ローカルdelegate変更の再通知を外部変更と区別する。[S29]
-
-Coordinatorは入力世代、適用済み外部世代、composition状態、選択、保留変更を管理する。ローカル編集はモデルへ伝えるが、エコーバックで再適用しない。外部の変更だけを安全点で差分適用し、初回読込や明示的な版採用以外の全置換を避ける。
-
-UIとtextStorage操作はMainActor上で行う。暗号化・通信・大きいJSON処理は不変スナップショットから別処理へ渡す。非同期結果が戻ったら所有者・文書・世代を再確認する。
-
-marked textの間は、アプリから`unmarkText`、resignFirstResponder、全文属性再設定、selectedRange再設定を呼んで確定させない。標準の入力プロトコル、responder chain、UndoManagerを妨げない。添付進捗やテーマ変更で入力ビューを再生成しない。
-
-Dynamic Typeや添付サイズによるレイアウト更新は必要範囲に限定する。未確定範囲の属性変更が必要な場合は安全点へ延期する。候補ウィンドウ、キャレット、選択、スクロール位置を試験し、変換中の入力行を画面外へ飛ばさない。
+Webの自動リンク、スマート引用符、スマートダッシュ等、アプリ側で制御可能な自動置換はPlaintext仕様に合わせて無効にする。日本語IME自体の予測・ライブ変換・ユーザー辞書をアプリで無効化しない。OSによる候補確定・音声入力の置換も通常の入力として受け取る。
 
 ### 9.6 保存・復旧・上限
 
@@ -466,7 +398,7 @@ IME中も既存添付の転送・サーバー取得自体は継続できる。�
 
 確定済み本文の変更から700ms、連続確定入力でも最後の送信から5秒を目安に保存する。IME中は§9の安全点を優先。同一編集面の保存と暗号化は直列化し、保存応答で入力面を置換しない。後続入力があれば未保存のまま次を送る。
 
-前面操作中は5秒ごと、60秒無操作後は30秒ごとに条件付きGET。非表示時は停止し、前面復帰・フォーカス復帰・オンライン復帰に取得する。前回応答後に次回を予約し、遅い要求を積み上げない。ネイティブのバックグラウンド常時実行を前提にしない。
+前面操作中は5秒ごと、60秒無操作後は30秒ごとに条件付きGET。非表示時は停止し、前面復帰・フォーカス復帰・オンライン復帰に取得する。前回応答後に次回を予約し、遅い要求を積み上げない。ブラウザーのバックグラウンド常時実行を前提にしない。
 
 ETagは`"d-<documentId>-e-<syncEpoch>-r<revision>"`。認証済み所有者から文書を解決し、ID、epoch、revision全てを照合する。`If-Match: *`とLast Write Winsを許可しない。変更なしGETは304とし、本文BLOBや添付情報を無駄に読み出さない。
 
@@ -490,17 +422,15 @@ ETagは`"d-<documentId>-e-<syncEpoch>-r<revision>"`。認証済み所有者か�
 
 BroadcastChannelはdocumentId・syncEpoch・revisionの変更通知だけに使う。鍵・本文は流さず、APIから再取得する。通知欠落でもポーリングで収束する。同一ブラウザー内通知であり端末間通信ではない。[S33]
 
-ネイティブのネットワーク送信は文書単位の共通SyncActorで直列化するが、各sceneの入力・IME・未保存ドラフトは独立管理する。複数ウィンドウの並行編集も遠隔版と同じ競合規則で扱い、一方の入力を上書きしない。
-
 再認証後は条件なし取得で所有者と文書を再確認する。変更時はキュー、鍵、ETag、選択、Object URL、プレイヤーを切り離す。旧sessionGenerationの応答を新画面へ適用しない。文書IDが同じでもsyncEpochが変わったら復旧後の再照合に入り、自動送信を止める。
 
 ### 10.6 オフライン・端末退避
 
-未同期ドラフトはaccountId/documentId/tabまたはsceneIdごとに最新1件。本文、基準ETag、mutationIdを含む再送ペイロード、挿入予定位置/状態、必要なローカルメディアマニフェストを暗号化保存する。古い完了通知で新しいドラフトを削除しない。複数タブのドラフトを一括削除しない。
+未同期ドラフトはaccountId/documentId/tabIdごとに最新1件。本文、基準ETag、mutationIdを含む再送ペイロード、挿入予定位置/状態、必要なローカルメディアマニフェストを暗号化保存する。古い完了通知で新しいドラフトを削除しない。複数タブのドラフトを一括削除しない。
 
 元ファイル全体の永続複製・終了後アップロード再開は保証しない。再選択時の同一性を確認できなければ新しいmediaId/fileKeyでやり直す。暗号化前の元ファイル名等を平文の再開情報として保存しない。
 
-ネイティブは解除できるキャッシュがあればオフライン起動・編集可能。Webは開いているページのオフライン編集を対象にし、通信できない状態からの完全な初回起動は保証しない。
+Webは開いているページのオフライン編集を対象にし、通信できない状態からの完全な初回起動は保証しない。
 
 失敗は1/2/4秒から最大30秒のバックオフと乱数幅で再試行する。429のRetry-Afterを尊重。401、復号失敗、未知形式をネットワーク障害として無限再送しない。visibilitychangeでは安全な保存を試みるが、終了イベント/sendBeaconだけに依存しない。
 
@@ -520,7 +450,7 @@ BroadcastChannelはdocumentId・syncEpoch・revisionの変更通知だけに使�
 | アカウント容量 | 暗号文実容量10GiB、転送予約・削除待ちを含む |
 | Webの全体Blob復号フォールバック | 原則20MiB以下、メモリーを測定してさらに制限可能 |
 
-MB/GBは10進（100MB = 100,000,000バイト、10GB = 10,000,000,000バイト）とし、音声・アカウント容量・小容量Blob復号の上限は従来どおりとする。今回の上限変更はWeb/APIを対象にし、既配布のネイティブアプリの選択時上限はアプリ更新まで変更しない。
+MB/GBは10進（100MB = 100,000,000バイト、10GB = 10,000,000,000バイト）とし、音声・アカウント容量・小容量Blob復号の上限は従来どおりとする。添付上限はWeb/APIで一致させる。
 
 種類別上限・MIME/先頭データ検査はクライアントが行う。サーバーには種別を明かさず、全種別共通の最大暗号文容量・パート容量・予約容量を強制する。10GB平文の最大暗号文容量は10,000,152,592バイト（9,537チャンク、1,193パート）。1パートの上限は従来の8,388,736バイトのままとし、最終パートは779,280バイトになる。アカウント全体の10GiB枠には暗号化増分・既存添付・転送予約も含め、残容量不足は開始時に拒否する。予約は同時開始でも原子的に加算し、旧実装による不正な予約カウンターは進行中の転送がない場合だけゼロへ修復する。メディアをD1に埋め込まない。[S14]
 
@@ -552,7 +482,7 @@ chunkPlainBytesは各チャンクの実際の平文長。AADの各整数は§6�
 5. 全パート確認後にR2完了、D1のready化を行う。本文にはまだ挿入済みとは限らない。
 6. IME安全点でローカル挿入を確定し、manifestと参照を含む本文をCAS保存する。この保存が終わって初めて他端末へ表示する。
 
-プレースホルダーは確定本文に含めない。周囲の本文は保存可能。前後の編集に合わせた位置追跡はProseMirrorのtransaction mappingやネイティブアダプターで行う。完了位置を古い数値offsetだけで保持しない。[S32]
+プレースホルダーは確定本文に含めない。周囲の本文は保存可能。前後の編集に合わせた位置追跡はProseMirrorのtransaction mappingで行う。完了位置を古い数値offsetだけで保持しない。[S32]
 
 ### 11.4 パートの冪等性と障害回復
 
@@ -585,12 +515,6 @@ Service WorkerはMessageChannelと実際のclientIdで解除済み編集面へ�
 制御開始前に仮想URLで再生しない。Service Workerの更新で未保存エディターを強制reloadしない。旧新プロトコルの不一致は再読み込みの安全な案内へ進め、データを上書きしない。
 
 PWA、通知、バックグラウンド同期は追加しない。不対応環境のBlob復号は上表の小容量だけ。大容量を黙って全体復号したりサーバー復号へ戻したりしない。復号後ダウンロードも実装可能な経路だけ提供する。iPhone Safariの初回制御・Range・中断復帰を公開ゲートとする。
-
-### 11.7 ネイティブの復号再生
-
-AVPlayer/AVPlayerViewController等を使い、AVAssetResourceLoaderDelegateと専用スキームからRangeを受けてURLSession/CryptoKitで取得・復号する構成を第一候補とする。コンテンツ情報、取消、並行要求、シーク、ロック時停止を扱う。[S17]
-
-キャッシュは有界にし、512MiBを一括Data化しない。TextKit再レイアウトでプレイヤーを破棄しない。ネイティブも未検証平文をデコーダーへ渡さない。
 
 ### 11.8 参照解除・清掃
 
@@ -626,7 +550,7 @@ mediaのdocument_id/client_upload_idをuniqueにする。参照集合の同一�
 
 ### 12.2 API
 
-全て`/api/v1`配下。Webは相対URL、ネイティブは固定HTTPS Originを使う。
+全て`/api/v1`配下。Webは同一Originの相対URLを使う。
 
 | メソッド・パス | 用途 |
 | --- | --- |
@@ -677,31 +601,21 @@ PUT成功は新ETag、revision、mutationId、updatedAtだけを返す。平文�
 
 エラー形は`{"error":{"code":"...","message":"..."}}`。400形式不正、401認証必要、403scope不足、404非存在/他所有者、409冪等性/状態違反、412古いETag、413容量超過、416Range不正、422参照/整合性違反、428条件不足、429制限、500/503障害。鍵・平文・スタックを含めない。
 
-## 13. Webとネイティブのパスキー連携
+## 13. ブラウザーのパスキー互換性
 
-RP IDを`txt.2-38.com`で共通化する。署名済みアプリに`webcredentials:txt.2-38.com`のAssociated Domains entitlementを設定する。[S6]
+RP IDは`txt.2-38.com`、本番Originは`https://txt.2-38.com`のみ。iPhone SafariやmacOSのブラウザーからAppleのパスワード等を使うWebAuthn/PRFは継続する。ブラウザー対応のためにOriginやRPの検証を緩和しない。
 
-```json
-{
-  "webcredentials": {
-    "apps": ["<TEAM_ID>.<IOS_BUNDLE_ID>", "<TEAM_ID>.<MACOS_BUNDLE_ID>"]
-  }
-}
-```
+OS名だけでPRF互換性を保証せず、OS/ブラウザー/パスキー保存先/別端末経由の組で認証、PRF実出力、VaultKey解除、本文・添付復号を記録する。スマートフォンでもネイティブアプリの導入を要求しない。
 
-`/.well-known/apple-app-site-association`はHTTPS、未認証取得可能、JSON、リダイレクトなし。Team ID/Bundle IDは実際の署名・登録値を確認する。プレースホルダーのまま公開しない。
-
-iOS 18以降・macOS 15以降を最低対応候補とし、採用APIのavailabilityとPRF実機試験で確定する。OS名だけで互換性を保証せず、OS/ブラウザー/パスキー保存先/ネイティブまたは別端末経由の組で記録する。最新安定SDKを使い、ベータ専用APIを基本機能へ入れない。
-
-Web公開前に小さなSwift検証クライアントでWeb作成パスキーの認証、PRF、VaultKey解除、本文・添付復号を試す。逆方向も試験する。ネイティブ製品版を後にする方針は維持する。
+アプリとのAssociated Domains連携は提供しない。`/.well-known/*`は404/no-storeとし、アプリ関連付けJSONやSPAシェルを返さない。Apple-touch icon等のWeb公開資産とは別の経路である。
 
 ## 14. 公開・運用・セキュリティ
 
 本番の`APP_ORIGIN=https://txt.2-38.com`、`WEBAUTHN_RP_ID=txt.2-38.com`とする。Workers Custom Domainで公開し、HTML、静的資産、API、Service Workerを同一Originに置く。BindingsはDB、MEDIA、ASSETSを基本とする。
 
-workers.dev・プレビューの本番到達経路を無効化する。旧Access保護がある場合はtxtに必要な範囲だけを変更し、他アプリの保護を外さない。公開シェル、認証開始、AASA、privacy、support、OGP画像、robots.txtは未認証で到達可能。公開シェルはdescription、canonical、OGP（`og:*`と`twitter:card`）を持ち、検索エンジンへの掲載を許可する。`<title>`は§4.2のとおり固定し、共有時の見出しは`og:title`で与える。robots.txtはAPIと`/_local/`をクロール対象から外す。OGP画像等の公開ファイルがSPAのフォールバックでindex.htmlに置き換わらないようにする。本文・添付・鍵ラップはセッション認証を要求する。
+workers.dev・プレビューの本番到達経路を無効化する。旧Access保護がある場合はtxtに必要な範囲だけを変更し、他アプリの保護を外さない。公開シェル、認証開始、privacy、support、OGP画像、robots.txtは未認証で到達可能。公開シェルはdescription、canonical、OGP（`og:*`と`twitter:card`）を持ち、検索エンジンへの掲載を許可する。`<title>`は§4.2のとおり固定し、共有時の見出しは`og:title`で与える。robots.txtはAPIと`/_local/`をクロール対象から外す。OGP画像等の公開ファイルがSPAのフォールバックでindex.htmlに置き換わらないようにする。本文・添付・鍵ラップはセッション認証を要求する。
 
-静的配信とAPIルーティングの順序を明確にし、APIや`/_local/`がSPAフォールバックでindex.htmlを返さないようにする。Worker先行を使う場合も、旧Access検証を残してログイン画面やAASAを塞がない。[S34]
+静的配信とAPIルーティングの順序を明確にし、APIや`/_local/`がSPAフォールバックでindex.htmlを返さないようにする。Worker先行を使う場合も、旧Access検証を残してログイン画面を塞がない。[S34]
 
 CSPはself中心。script-src/connect-src/worker-srcはself、object-src/base-uri/frame-ancestorsはnone、img/mediaのblobは必要範囲のみ。外部CDNスクリプト、eval、任意インラインスクリプト、解析タグ、セッションリプレイを使わない。nosniff、Referrer-Policy:no-referrerを設定する。
 
@@ -715,21 +629,13 @@ API、暗号文、復号後応答はprivate,no-store。ハッシュ付き公開�
 
 D1復元時はsyncEpochを更新し、セッション失効・削除済みアカウントの再無効化を復元手順に含める。元のencryptedRevisionを勝手に書き換えない。CloudflareのTime Travelや端末コピーがあるため、履歴UIなしを即時完全消去と説明しない。[S18]
 
-## 15. 個人名義でのApp Store公開
+## 15. Web公開とアカウント削除
 
-個人Developer Programアカウントで公開する。App Storeの法的氏名表示は、利用者のメールを取得しない設計とは別の事項として確認する。[S19]
-
-パスキーマネージャーの選択は自社アカウントの資格情報保管であり、その理由だけでSign in with Appleを追加しない。実際の構成を審査時のGuidelines 4.8/5.1等で確認する。[S20]
-
-アプリ内でアカウント削除を開始できるようにする。step-upと確認後にdeletingへ移行し、全セッション・資格情報を失効、本文・添付・鍵ラップ・復旧情報を清掃する。単なるログアウトやメール依頼で代用しない。[S21]
+ブラウザー内でアカウント削除を開始できるようにする。step-upと確認後にdeletingへ移行し、全セッション・資格情報を失効、本文・添付・鍵ラップ・復旧情報を清掃する。単なるログアウトやメール依頼で代用しない。
 
 物理削除の再試行に必要な最小状態だけを残し、削除期間とバックアップの扱いを説明する。削除済みアカウントをバックアップから通常運用へ復活させない。パスキーマネージャーの保存項目や、オフライン端末のコピーの自動消去は保証しない。
 
-privacy/supportを公開し、App Privacy、プライバシーポリシー、不要な権限を実装と整合させる。暗号化しているだけで申告不要と判断しない。[S22]
-
-暗号輸出コンプライアンスは実装と配信地域に基づき確認する。標準AES/OS API利用だけを理由にITSAppUsesNonExemptEncryptionを決め打ちしない。[S23]
-
-審査者が通常のパスキー新規登録、復旧キー保存、本文・添付操作を試せる説明をReview Notesへ記載する。審査専用の認証バイパスや共通復号鍵を作らない。審査通過やストア名の使用可否を保証しない。
+privacy/supportを公開し、プライバシーポリシーと実装を整合させる。不要な端末権限を要求しない。公開・法令上の説明はWebサービスの実際の構成と提供地域に基づき確認する。
 
 ## 16. 実装構成・リリース順序
 
@@ -739,10 +645,8 @@ apps/
   web/                  # HTML/CSS/JS、editor adapter、composition、同期
                         # WebAuthn、暗号Worker、メディアService Worker
   worker/               # Hono、認証、D1、R2、清掃
-  apple/                # iOS/macOS、TextKit adapter、Coordinator、標準UI
 packages/
   protocol/             # schema、Encode、暗号契約、fixture・テストベクトル
-  TxtCore/              # Swiftモデル、CryptoKit、API、SyncActor
 migrations/
 tests/
   protocol/
@@ -758,12 +662,11 @@ ProseMirror等の依存バージョンは固定し、更新時にIME/選択/Undo
 
 Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗号化負荷、実際の圧縮サイズを同じ機能で測定し、不要依存を削る。性能未測定のまま最速・最軽量と説明しない。
 
-1. 先行検証: 日本語IME＋メディア＋Undoの小さな編集面、Web/SwiftのPRF/暗号形式、E2EE動画Range。
+1. 先行検証: 日本語IME＋メディア＋Undoの小さな編集面、ブラウザーのPRF/暗号形式、E2EE動画Range。
 2. Web基礎: 登録・復旧・セッション、暗号化本文、共通モデル、CAS、暗号化退避。
 3. Web完成: 添付、競合、清掃、IMEと障害注入、セキュリティレビュー、公開設定。
-4. ネイティブ製品版: TxtCore、iOS/Mac標準UI、TextKit入力、オフライン、AVFoundation、審査準備。
 
-「完成」は対象フェーズの受け入れ条件に合格した状態をいう。ネイティブ製品版が未完成でもWeb公開は可能だが、暗号相互運用の先行検証は省略しない。
+「完成」はWebの対象フェーズの受け入れ条件に合格した状態をいう。ブラウザーのPRF・暗号形式・メディア再生の先行検証は省略しない。
 
 ## 17. 受け入れ条件・検証手順
 
@@ -774,10 +677,9 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 | iPhone Web | 対応するSafari、日本語かな/フリック、ローマ字、予測候補、外部キーボード |
 | Mac Web | Safari、Chromium系、FirefoxとmacOS日本語入力。ライブ変換ON/OFF |
 | Windows Web | Chromium系/FirefoxとMicrosoft IME。対応を掲げるGoogle日本語入力も確認 |
-| iOS native | 最低対応OSと公開時安定OS、日本語かな/ローマ字、予測、外部キーボード |
-| macOS native | 最低対応OSと公開時安定OS、ライブ変換ON/OFF、再変換 |
+| Android Web | 対応ブラウザー、日本語入力、予測候補、ソフトウェア/外部キーボード |
 
-実際の機種、OS、ブラウザー、IME、ライブラリーバージョンを記録する。Web公開時はWeb行、ネイティブ公開時はnative行を必須とする。未確認環境を対応済みにしない。
+実際の機種、OS、ブラウザー、IME、ライブラリーバージョンを記録する。対応を掲げるWeb環境の行を必須とする。未確認環境を対応済みにしない。
 
 ### 17.2 IMEシナリオ
 
@@ -804,7 +706,7 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 
 - [ ] メール・電話・通常パスワードなしに登録/ログインできる。
 - [ ] PRF非対応、追加assertion、取消、途中終了を扱い、読めないactive文書を作らない。
-- [ ] 同じ資格情報でWeb→Swift、Swift→WebのVaultKey・本文・添付相互復号に合格する。
+- [ ] 対応ブラウザーとパスキー保存先の組で、同じ資格情報によるVaultKey・本文・添付の再解除・復号に合格する。
 - [ ] nonce、tag配置、Encode、HKDF、base64url、Unicodeの共通既知入力/期待出力が一致する。
 - [ ] PRF results等がtoJSON/SDK応答経由でAPI・ログ・監視に出ない。
 - [ ] 署名、challenge再利用、UVなし、別Origin、別RP、userHandle不一致を拒否する。
@@ -814,7 +716,7 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 ### 17.4 編集・同期・永続化
 
 - [ ] title/一覧なしに1枚を開き、装飾やHTMLを保存しない。
-- [ ] Web/TextKit共通fixtureの往復で文字、ID、空行、末尾LF、メディア参照が保持される。
+- [ ] Webの共通モデルfixtureの往復で文字、ID、空行、末尾LF、メディア参照が保持される。
 - [ ] 同revisionの別アカウントを誤304/誤PUTにしない。
 - [ ] 保存中の追加入力、暗号化完了順逆転、古い応答で新しい入力/ドラフトを消さない。
 - [ ] 同ETagからの並行保存を412で検出し、両方の内容を保全する。
@@ -822,14 +724,13 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 - [ ] GET中の更新でも本文・参照が混在しない。CAS失敗では参照だけを変更しない。
 - [ ] 5秒/30秒/非表示停止、再表示取得と表示上の説明が一致する。
 - [ ] 遠隔版採用後にUndoで旧版を復活させない。
-- [ ] 複数タブ/sceneのドラフト、アカウント切替、syncEpoch変更を安全に扱う。
+- [ ] 複数タブ/ウィンドウのドラフト、アカウント切替、syncEpoch変更を安全に扱う。
 
 ### 17.5 添付・運用・UI
 
 - [ ] 512MiB動画の先頭/中間/末尾シークを全体読み込みなしで実機確認する。
 - [ ] チャンク改変・順序入替・切詰めを認証前の平文出力なしで拒否する。
 - [ ] Service Worker初回制御・再起動・更新・ロック・複数タブで鍵を取り違えない。
-- [ ] native resource loaderの並行要求・取消・Range・キャッシュ上限を確認する。
 - [ ] 同一パート再送、変更ペイロード、遅い応答、完了と取消、R2成功/D1失敗から回復する。
 - [ ] 再参照と清掃が競合しても参照中実体を削除しない。
 - [ ] 他人のID、未参照・未完成メディア、公開R2経路で認可を迂回できない。
@@ -837,7 +738,7 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 - [ ] VoiceOver、拡大、ライト/ダーク、標準picker/toolbar/menu、キーボード操作を確認する。
 - [ ] Webの紹介を矢印キー・Escで操作でき、「スキップ」「パスキーを作成」「使い方」からの見返しが動く。登録直後の案内は入力開始またはIME変換開始で消え、編集面のフォーカスを奪わない。
 - [ ] `prefers-reduced-motion`で紹介・ダイアログ・トーストが最終状態で表示され、編集面とその祖先要素にtransform/opacityアニメーションがない。
-- [ ] AASAの実値・未認証配信、アカウント削除、privacy/support、個人公開時の各申告を確認する。
+- [ ] Web-only配信、アカウント削除、privacy/support、OGP・Apple-touch icon・Web Shareを確認する。
 
 公開判定では未実施を合格扱いしない。性能、セキュリティ、入力、再生の結果を区別し、対応表に未検証・非対応・合格を記録する。
 
@@ -845,7 +746,7 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 
 | 改善項目 | 本書での扱い |
 | --- | --- |
-| 編集処理の全面自作を避ける | 最小ProseMirror、native TextKit。依存ゼロ制約を解除（§2/9） |
+| 編集処理の全面自作を避ける | 最小ProseMirror。依存ゼロ制約を解除（§2/9） |
 | 日本語IMEを実装規則へ落とす | composition安全点、marked text、キー操作、退避、実機試験（§9/17） |
 | revisionだけのETagを改善 | 文書ID+syncEpoch+revision、所有者確認（§10） |
 | 保存と添付のdirtyを分離 | 確定入力、転送、保留完了、遠隔版を別状態化（§10） |
@@ -863,43 +764,27 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 
 複数文書、文書タイトル、フォルダー、タグ、検索機能、公開共有（文書の共有。アプリのURLを紹介する§4.6の操作は含まない）、共同編集カーソル、履歴一覧、ごみ箱、Markdown表示、装飾、AI、文字起こし、録音/録画、サーバー動画変換、広告、通知、常時バックグラウンド同期は追加しない。復旧・削除・エラー対応に必要なUI以外を「便利そう」という理由で増やさない。§4.1の初回案内は、パスキー・E2EE・復旧キーを理解しないまま登録して内容を失うことを防ぐための例外とする。
 
-Apple Team ID、Bundle ID、D1/R2のID、Cloudflare本番設定、公開時の対応バージョン表、運用全体容量、価格/販売地域、実測性能、独立レビュー結果は実装・公開準備で記入する実値である。認証や入力の方式を未定にしているという意味ではない。
+D1/R2のID、Cloudflare本番設定、公開時の対応バージョン表、運用全体容量、価格/販売地域、実測性能、独立レビュー結果は実装・公開準備で記入する実値である。認証や入力の方式を未定にしているという意味ではない。
 
-本書を更新しただけではDNS、Access、D1、R2、Apple登録、ストア申請、暗号実装、実機UI、IME、動画再生は設定・検証されない。
+本書を更新しただけではDNS、Access、D1、R2、暗号実装、実機UI、IME、動画再生は設定・検証されない。
 
 ## 20. 参照資料
 
-従来統合仕様の一次資料[S1]〜[S24]を継承し、今回のIME・編集・同期補強に[S25]〜[S34]を追加した。調査/仕様更新日: 2026-09-20。資料のAPI説明と、本書独自の採用判断・未実測の目標値を区別する。
+Webの認証・暗号・IME・編集・同期に必要な一次資料を残す。参照番号は既存のWeb契約のために維持し、削除した実装専用の番号は再利用しない。調査/仕様更新日: 2026-09-20。資料のAPI説明と、本書独自の採用判断・未実測の目標値を区別する。
 
 - [S1] W3C WebAuthn Level 3（PRF、資格情報、検証、PRF resultsの送信注意）: `https://www.w3.org/TR/webauthn-3/`
 - [S2] SimpleWebAuthn server: `https://simplewebauthn.dev/docs/packages/server`
-- [S3] Apple PRF assertion input: `https://developer.apple.com/documentation/authenticationservices/asauthorizationpublickeycredentialprfassertioninput-swift.struct`
 - [S4] 1Password iOS 8.10.74 release notes: `https://releases.1password.com/ios/stable/8.10.74/`
 - [S5] SimpleWebAuthn PRF guidance: `https://simplewebauthn.dev/docs/advanced/prf`
-- [S6] Apple Connecting to a service with passkeys: `https://developer.apple.com/documentation/authenticationservices/connecting-to-a-service-with-passkeys`
-- [S7] Apple TextKit: `https://developer.apple.com/documentation/uikit/textkit`
-- [S8] Apple HIG Toolbars: `https://developer.apple.com/design/human-interface-guidelines/toolbars`
-- [S9] Apple WWDC25 What's new in SwiftUI: `https://developer.apple.com/videos/play/wwdc2025/256/`
 - [S10] MDN Web Crypto: `https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API`
-- [S11] Apple CryptoKit: `https://developer.apple.com/documentation/cryptokit`
-- [S12] Apple Storing CryptoKit keys in the keychain: `https://developer.apple.com/documentation/cryptokit/storing-cryptokit-keys-in-the-keychain`
 - [S13] Cloudflare D1 Database / batch: `https://developers.cloudflare.com/d1/worker-api/d1-database/`
 - [S14] Cloudflare D1 limits: `https://developers.cloudflare.com/d1/platform/limits/`
 - [S15] Cloudflare R2 Workers API: `https://developers.cloudflare.com/r2/api/workers/workers-api-reference/`
 - [S16] MDN FetchEvent.respondWith: `https://developer.mozilla.org/en-US/docs/Web/API/FetchEvent/respondWith`
-- [S17] Apple AVAssetResourceLoaderDelegate: `https://developer.apple.com/documentation/avfoundation/avassetresourceloaderdelegate`
 - [S18] Cloudflare D1 Time Travel: `https://developers.cloudflare.com/d1/reference/time-travel/`
-- [S19] Apple Program enrollment: `https://developer.apple.com/help/account/membership/program-enrollment/`
-- [S20] Apple App Review Guidelines: `https://developer.apple.com/app-store/review/guidelines/`
-- [S21] Apple Offering account deletion in your app: `https://developer.apple.com/support/offering-account-deletion-in-your-app/`
-- [S22] Apple App privacy details: `https://developer.apple.com/app-store/app-privacy-details/`
-- [S23] Apple Overview of export compliance: `https://developer.apple.com/help/app-store-connect/manage-app-information/overview-of-export-compliance/`
 - [S24] ProseMirror schema guide source: `https://raw.githubusercontent.com/ProseMirror/website/master/markdown/guide/schema.md`
 - [S25] MDN beforeinput（IME等で取消不能/未発火となる場合）: `https://developer.mozilla.org/en-US/docs/Web/API/Element/beforeinput_event`
 - [S26] ProseMirror Reference（EditorView.composing、transaction、DOM管理）: `https://prosemirror.net/docs/ref/`
-- [S27] Apple UITextInput.markedTextRange: `https://developer.apple.com/documentation/uikit/uitextinput/markedtextrange`
-- [S28] Apple NSTextInputClient.hasMarkedText: `https://developer.apple.com/documentation/appkit/nstextinputclient/hasmarkedtext()`
-- [S29] Apple UIViewRepresentable（Coordinatorと更新経路）: `https://developer.apple.com/documentation/swiftui/uiviewrepresentable`
 - [S30] MDN compositionend（確定または取消）: `https://developer.mozilla.org/en-US/docs/Web/API/Element/compositionend_event`
 - [S31] ProseMirror開発者によるcomposition状態の説明: `https://discuss.prosemirror.net/t/the-composing-property-of-editorview-may-be-incorrect-within-the-handletextinput-method/8877`
 - [S32] ProseMirror公式添付例のソース（位置追跡・取消）: `https://raw.githubusercontent.com/ProseMirror/website/master/example/upload/index.js`

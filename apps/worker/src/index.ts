@@ -119,23 +119,10 @@ app.get("/api/v1/debug/host", (c) => {
   });
 });
 
-/**
- * Apple App Site Association (spec §13). Served only once real signed app
- * values are configured: a placeholder is never published.
- */
-app.get("/.well-known/apple-app-site-association", (c) => {
-  const { TxtTeamId, TxtIosBundleId, TxtMacosBundleId } = c.env;
-  if (!TxtTeamId || !TxtIosBundleId || !TxtMacosBundleId) {
-    return c.json(
-      { error: { code: "NOT_FOUND", message: "not configured" } },
-      404,
-    );
-  }
-  return c.json({
-    webcredentials: {
-      apps: [`${TxtTeamId}.${TxtIosBundleId}`, `${TxtTeamId}.${TxtMacosBundleId}`],
-    },
-  });
+/** Unpublished well-known resources must not fall through to the SPA. */
+app.all("/.well-known/*", (c) => {
+  c.header("cache-control", "no-store");
+  return c.text("not found", 404);
 });
 
 /** API 404s must not fall through to the SPA. */

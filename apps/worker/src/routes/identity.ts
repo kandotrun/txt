@@ -560,7 +560,7 @@ routes.post("/recovery/start", async (c) => {
   if (!account || account.status === "deleting") throw notFound("recovery not found");
 
   const { issueSession } = await import("../auth/sessions.ts");
-  const clientKind = c.req.header("origin") === c.env.APP_ORIGIN ? "web" : "native";
+  const clientKind = "web";
   const session = await issueSession(c.env, {
     accountId,
     clientKind,
@@ -577,20 +577,10 @@ routes.post("/recovery/start", async (c) => {
     ? encodeBase64Url(accountRow.user_handle)
     : null;
 
-  if (clientKind === "web") {
-    const { sessionCookie } = await import("../auth/sessions.ts");
-    c.header("set-cookie", sessionCookie(session.token, c.env));
-    return c.json({
-      scope: "recovery",
-      recoveryVersion: row.recovery_version,
-      keyVersion: row.key_version,
-      userHandle,
-      expiresAt: session.expiresAt,
-    });
-  }
+  const { sessionCookie } = await import("../auth/sessions.ts");
+  c.header("set-cookie", sessionCookie(session.token, c.env));
   return c.json({
     scope: "recovery",
-    token: session.token,
     recoveryVersion: row.recovery_version,
     keyVersion: row.key_version,
     userHandle,

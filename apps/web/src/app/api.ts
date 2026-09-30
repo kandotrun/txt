@@ -56,8 +56,8 @@ export interface SessionInfo {
   accountStatus: string;
   userHandle: string | null;
   scope: "pending" | "active" | "recovery";
-  clientKind: "web" | "native";
-  via: "cookie" | "bearer";
+  clientKind: "web";
+  via: "cookie";
   stepupAt: number | null;
   expiresAt: number;
   idleExpiresAt: number;

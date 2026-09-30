@@ -5,7 +5,7 @@
  * concatenates them. Strings are UTF-8, UUIDs are 16 bytes, credential IDs are
  * raw bytes, integers are uint64 big-endian.
  *
- * No JSON key ordering, locale-dependent strings, or Swift hash ordering.
+ * No JSON key ordering or locale-dependent strings.
  */
 
 const encoder = new TextEncoder();
