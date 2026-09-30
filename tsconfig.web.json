@@ -21,6 +21,7 @@
     "tests/e2e/**/*.ts",
     "vitest.config.ts",
     "playwright.config.ts",
-    "tests/security/**/*.ts"
+    "tests/security/**/*.ts",
+    "tests/web/**/*.ts"
   ]
 }
