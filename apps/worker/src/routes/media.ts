@@ -11,7 +11,7 @@ import { Hono } from "hono";
 import type { AppBindings } from "../context.ts";
 import { requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed } from "../auth/sessions.ts";
-import { conflict, notFound, preconditionFailed } from "../errors.ts";
+import { conflict, notFound, payloadTooLarge, preconditionFailed } from "../errors.ts";
 import { nowMs } from "../util.ts";
 import { normalizeEtag } from "../document/store.ts";
 import {
@@ -77,6 +77,34 @@ routes.get("/uploads/:id", async (c) => {
   });
 });
 
+/** Read at most one ciphertext part; neither absent nor forged length headers are trusted. */
+async function readPartBody(request: Request): Promise<ArrayBuffer> {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null && Number(declaredLength) > NORMAL_PART_BYTES) {
+    throw payloadTooLarge("part body exceeds the maximum part size");
+  }
+  if (!request.body) return new ArrayBuffer(0);
+
+  const reader = request.body.getReader();
+  const bytes = new Uint8Array(NORMAL_PART_BYTES);
+  let length = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value.byteLength > NORMAL_PART_BYTES - length) {
+        await reader.cancel().catch(() => undefined);
+        throw payloadTooLarge("part body exceeds the maximum part size");
+      }
+      bytes.set(value, length);
+      length += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return length === NORMAL_PART_BYTES ? bytes.buffer : bytes.buffer.slice(0, length);
+}
+
 /** PUT /api/v1/media/uploads/:id/parts/:partNumber — one ciphertext part. */
 routes.put("/uploads/:id/parts/:partNumber", async (c) => {
   const auth = await requireAuth(c);
@@ -86,7 +114,7 @@ routes.put("/uploads/:id/parts/:partNumber", async (c) => {
   if (!Number.isSafeInteger(partNumber) || partNumber < 1) {
     return c.json({ error: { code: "BAD_REQUEST", message: "invalid part number" } }, 400);
   }
-  const body = await c.req.raw.arrayBuffer();
+  const body = await readPartBody(c.req.raw);
   const part = await acceptPart(c.env, { media, partNumber, body, now: nowMs() });
   return c.json({
     partNumber: part.part_number,

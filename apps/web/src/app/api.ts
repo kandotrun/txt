@@ -314,7 +314,7 @@ class ApiClient {
     }>(`/api/v1/media/uploads/${encodeURIComponent(mediaId)}`);
   }
 
-  async uploadPart(mediaId: string, partNumber: number, bytes: Uint8Array): Promise<void> {
+  async uploadPart(mediaId: string, partNumber: number, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
     const response = await fetch(
       `/api/v1/media/uploads/${encodeURIComponent(mediaId)}/parts/${partNumber}`,
       {
@@ -325,6 +325,7 @@ class ApiClient {
         },
         body: bytes as unknown as BodyInit,
         credentials: "same-origin",
+        signal,
       },
     );
     if (!response.ok) {

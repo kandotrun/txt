@@ -14,6 +14,7 @@
  *   parts.
  */
 
+import { MAX_MEDIA_CIPHER_BYTES } from "../../../../packages/protocol/src/media-limits.ts";
 import type { Env } from "../types.ts";
 import { conflict, notFound, payloadTooLarge, preconditionFailed, rangeNotSatisfiable, unprocessable } from "../errors.ts";
 import { nowMs, randomBytes, uuid, bytesToBase64Url } from "../util.ts";
@@ -32,7 +33,7 @@ export function arrayBufferEqual(
   return diff === 0;
 }
 
-export const MAX_CIPHER_BYTES = 536_879_104; // 512MiB plaintext + tags (spec §11.1)
+export const MAX_CIPHER_BYTES = MAX_MEDIA_CIPHER_BYTES; // common E2EE object cap (spec §11.1)
 export const NORMAL_PART_BYTES = 8_388_736; // 8 chunks
 export const CHUNK_CIPHER_BYTES = 1_048_592;
 export const PART_LEASE_MS = 60_000;
@@ -45,6 +46,7 @@ export interface MediaRow {
   client_upload_id: string;
   object_key: string;
   cipher_bytes: number;
+  reservation_held: number;
   crypto_format: number;
   chunk_bytes: number;
   state: string;
@@ -127,15 +129,36 @@ export async function startUpload(
   const mediaId = uuid();
   const objectKey = `cipher/${mediaId}`;
 
-  // Reserve capacity first: a conditional update that cannot overshoot.
-  const reserve = await env.DB.prepare(
-    `UPDATE storage_usage
-        SET reserved_bytes = ?
-      WHERE account_id = ?1 AND used_bytes + reserved_bytes + ?2 <= limit_bytes`,
-  )
-    .bind(options.accountId, cipherBytes)
-    .run();
-  if ((reserve.meta.changes ?? 0) !== 1) {
+  // Repair legacy UUID/text or negative counters only when there can be no
+  // live reservation. Never infer or rewrite used_bytes or the account quota.
+  // Both predicates run in D1, not in a racy SELECT -> application-side check.
+  const [, reserve] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE storage_usage SET reserved_bytes = 0
+        WHERE account_id = ?1
+          AND (typeof(reserved_bytes) != 'integer' OR reserved_bytes < 0)
+          AND NOT EXISTS (
+            SELECT 1 FROM media WHERE account_id = ?1
+              AND (state IN ('creating', 'uploading', 'completing')
+                OR (state = 'deleting' AND reservation_held = 1))
+          )`,
+    ).bind(options.accountId),
+    env.DB.prepare(
+      `UPDATE storage_usage
+          SET reserved_bytes = reserved_bytes + ?2
+        WHERE account_id = ?1
+          AND typeof(reserved_bytes) = 'integer' AND reserved_bytes >= 0
+          AND used_bytes + reserved_bytes + ?2 <= limit_bytes`,
+    ).bind(options.accountId, cipherBytes),
+  ]);
+  if ((reserve?.meta.changes ?? 0) !== 1) {
+    const usage = await env.DB.prepare(
+      `SELECT reserved_bytes FROM storage_usage WHERE account_id = ?1`,
+    ).bind(options.accountId).first<{ reserved_bytes: unknown }>();
+    if (usage && (typeof usage.reserved_bytes !== "number"
+        || !Number.isSafeInteger(usage.reserved_bytes) || usage.reserved_bytes < 0)) {
+      throw conflict("account storage reservation needs repair", "STORAGE_USAGE_INVALID");
+    }
     throw payloadTooLarge("account storage limit exceeded");
   }
 
@@ -143,8 +166,8 @@ export async function startUpload(
     await env.DB.prepare(
       `INSERT INTO media
          (id, document_id, account_id, client_upload_id, object_key, cipher_bytes,
-          crypto_format, chunk_bytes, state, expires_at, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'creating', ?9, ?10)`,
+          crypto_format, chunk_bytes, state, expires_at, created_at, reservation_held)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'creating', ?9, ?10, 1)`,
     )
       .bind(
         mediaId,
@@ -259,7 +282,12 @@ export async function acceptPart(
     if (!arrayBufferEqual(hashBytes, existing.hash32) || existing.bytes !== options.body.byteLength) {
       throw conflict("part number reused with different content", "PART_CONFLICT");
     }
-    // Identical retry: do not overwrite the accepted part in R2.
+    // Identical retry is activity, but never revive a completed/cancelled row.
+    // The accepted part itself remains immutable and is not rewritten in R2.
+    await env.DB.prepare(
+      `UPDATE media SET expires_at = ?2
+        WHERE id = ?1 AND state IN ('creating', 'uploading')`,
+    ).bind(media.id, options.now + UPLOAD_EXPIRY_MS).run();
     return existing;
   }
 
@@ -308,14 +336,27 @@ export async function acceptPart(
     throw new Error(`R2 part upload failed: ${(error as Error).message}`);
   }
 
-  await env.DB.prepare(
-    `UPDATE upload_parts
-        SET state = 'accepted', etag = ?3, accepted_at = ?4,
-            lease_owner = NULL, lease_expires_at = NULL
-      WHERE media_id = ?1 AND part_number = ?2 AND state = 'uploading' AND lease_owner = ?5`,
-  )
-    .bind(media.id, options.partNumber, uploaded.etag, options.now, leaseOwner)
-    .run();
+  // Activity expiry and part acceptance commit together. A cancellation/GC
+  // claim or a lost lease must not be revived by a delayed R2 response.
+  const [, acceptance] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE media SET expires_at = ?2
+        WHERE id = ?1 AND state IN ('creating', 'uploading') AND EXISTS (
+          SELECT 1 FROM upload_parts WHERE media_id = ?1 AND part_number = ?3
+            AND state = 'uploading' AND lease_owner = ?4
+        )`,
+    ).bind(media.id, options.now + UPLOAD_EXPIRY_MS, options.partNumber, leaseOwner),
+    env.DB.prepare(
+      `UPDATE upload_parts
+          SET state = 'accepted', etag = ?3, accepted_at = ?4,
+              lease_owner = NULL, lease_expires_at = NULL
+        WHERE media_id = ?1 AND part_number = ?2 AND state = 'uploading' AND lease_owner = ?5
+          AND EXISTS (SELECT 1 FROM media WHERE id = ?1 AND state IN ('creating', 'uploading'))`,
+    ).bind(media.id, options.partNumber, uploaded.etag, options.now, leaseOwner),
+  ]);
+  if ((acceptance?.meta.changes ?? 0) !== 1) {
+    throw conflict("upload is no longer accepting this part", "PART_BUSY");
+  }
 
   const accepted = await env.DB.prepare(
     `SELECT * FROM upload_parts WHERE media_id = ?1 AND part_number = ?2`,
@@ -375,22 +416,25 @@ export async function completeUpload(
     throw conflict("completed object size mismatch", "OBJECT_SIZE_MISMATCH");
   }
 
-  await env.DB.prepare(
-    `UPDATE media SET state = 'ready', ready_at = ?2, expires_at = NULL,
-            unreferenced_at = ?2
-      WHERE id = ?1 AND state = 'completing'`,
-  )
-    .bind(media.id, options.now)
-    .run();
-
-  // reserved -> used
-  await env.DB.prepare(
-    `UPDATE storage_usage
-        SET reserved_bytes = reserved_bytes - ?2, used_bytes = used_bytes + ?2
-      WHERE account_id = ?1`,
-  )
-    .bind(media.account_id, media.cipher_bytes)
-    .run();
+  // The live completing row and its quota move together in one D1 transaction.
+  // A stale snapshot must never move quota after cancellation/cleanup won.
+  const [, completed] = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE storage_usage
+          SET reserved_bytes = reserved_bytes - ?2, used_bytes = used_bytes + ?2
+        WHERE account_id = ?1 AND EXISTS (
+          SELECT 1 FROM media WHERE id = ?3 AND account_id = ?1 AND state = 'completing'
+        )`,
+    ).bind(media.account_id, media.cipher_bytes, media.id),
+    env.DB.prepare(
+      `UPDATE media SET state = 'ready', ready_at = ?2, expires_at = NULL,
+              unreferenced_at = ?2, reservation_held = 0
+        WHERE id = ?1 AND state = 'completing'`,
+    ).bind(media.id, options.now),
+  ]);
+  if ((completed?.meta.changes ?? 0) !== 1) {
+    throw conflict("upload is no longer being completed", "COMPLETE_BUSY");
+  }
 
   const updated = await env.DB.prepare(`SELECT * FROM media WHERE id = ?1`)
     .bind(media.id)
@@ -406,28 +450,53 @@ export async function cancelUpload(
   if (media.state === "ready" || media.state === "deleting") {
     throw conflict("upload cannot be cancelled in its current state");
   }
-  if (media.upload_id) {
-    try {
-      await env.MEDIA.resumeMultipartUpload(media.object_key, media.upload_id).abort();
-    } catch {
-      // Aborting a non-existent multipart is not fatal; cleanup retries later.
-    }
+  // Completion wins once claimed. Normalize legacy active rows only here;
+  // claiming deletion never frees capacity before physical cleanup succeeds.
+  const cancelled = await env.DB.prepare(
+    `UPDATE media SET state = 'deleting', reservation_held = 1
+      WHERE id = ?1 AND account_id = ?2 AND state IN ('creating', 'uploading')`,
+  ).bind(media.id, media.account_id).run();
+  if ((cancelled.meta.changes ?? 0) !== 1) {
+    throw conflict("upload cannot be cancelled in its current state");
   }
-  await env.DB.batch([
-    env.DB.prepare(`UPDATE media SET state = 'deleting' WHERE id = ?1`).bind(media.id),
-    env.DB.prepare(
-      `UPDATE storage_usage SET reserved_bytes = reserved_bytes - ?2 WHERE account_id = ?1`,
-    ).bind(media.account_id, media.cipher_bytes),
-  ]);
   await finalizeDeletion(env, media);
 }
 
-/** Removes metadata after the R2 object is gone (spec §11.8). */
-export async function finalizeDeletion(env: Env, media: MediaRow): Promise<void> {
-  await env.MEDIA.delete(media.object_key).catch(() => undefined);
+/** Releases a held reservation exactly once, only after physical cleanup. */
+export async function finalizeDeletion(
+  env: Env,
+  media: Pick<MediaRow, "id" | "account_id" | "object_key" | "cipher_bytes" | "upload_id">,
+): Promise<void> {
+  // Do not let a stale/non-deleting snapshot touch a ready physical object.
+  const deleting = await env.DB.prepare(
+    `SELECT 1 FROM media WHERE id = ?1 AND account_id = ?2 AND state = 'deleting'`,
+  ).bind(media.id, media.account_id).first();
+  if (!deleting) return;
+  if (media.upload_id) {
+    try {
+      await env.MEDIA.resumeMultipartUpload(media.object_key, media.upload_id).abort();
+    } catch (error) {
+      // R2 Workers binding codes are documented as a trailing message suffix.
+      // Only 10024 (NoSuchUpload) proves multipart absence; HTTP 404/HEAD null
+      // and unknown failures cannot establish that multipart bytes are gone.
+      if (!(error instanceof Error) || !/\(10024\)\s*$/.test(error.message)) return;
+    }
+  }
+  try {
+    await env.MEDIA.delete(media.object_key);
+  } catch {
+    return;
+  }
   await env.DB.batch([
-    env.DB.prepare(`DELETE FROM document_media WHERE media_id = ?1`).bind(media.id),
-    env.DB.prepare(`DELETE FROM media WHERE id = ?1 AND state = 'deleting'`).bind(media.id),
+    env.DB.prepare(
+      `UPDATE storage_usage SET reserved_bytes = reserved_bytes - ?2
+        WHERE account_id = ?1 AND EXISTS (
+          SELECT 1 FROM media WHERE id = ?3 AND account_id = ?1
+            AND state = 'deleting' AND reservation_held = 1
+        )`,
+    ).bind(media.account_id, media.cipher_bytes, media.id),
+    env.DB.prepare(`DELETE FROM media WHERE id = ?1 AND account_id = ?2 AND state = 'deleting'`)
+      .bind(media.id, media.account_id),
   ]);
 }
 

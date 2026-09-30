@@ -28,6 +28,7 @@ import { cancelExit, playExit, replayEnter } from "./motion.ts";
 import { runIntro } from "./onboarding.ts";
 import { shareApp } from "./share.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
+import { ServiceWorkerBridge } from "./service-worker-bridge.ts";
 import type { SyncState } from "./sync.ts";
 import {
   addPasskey,
@@ -117,6 +118,14 @@ const state: AppState = {
   attaching: new Map(),
   objectUrls: new Map(),
 };
+
+let mediaReady: Promise<boolean> = Promise.resolve(false);
+const serviceWorkerBridge = "serviceWorker" in navigator
+  ? new ServiceWorkerBridge(navigator.serviceWorker, { onInvalidated: () => {
+      state.serviceWorkerReady = false;
+      clearStreamSources();
+    } })
+  : null;
 
 /* ------------------------------------------------------------------ */
 /* Gate rendering (spec §4.6)                                          */
@@ -387,7 +396,14 @@ function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLEl
     // Images above the blob fallback are handled by the Service Worker stream.
     const img = document.createElement("img");
     img.alt = info.name;
-    img.src = `/_local/media/${encodeURIComponent(mediaId)}`;
+    // A fresh attachment is inaccessible until its reference PUT commits.
+    // Handle the rare ordering where that initial 404 arrives after the save.
+    img.addEventListener("error", () => {
+      if (["saved", "idle"].includes(elements.syncStatus.dataset.state ?? "")) {
+        void materializeStream(img, mediaId, info);
+      }
+    }, { once: true });
+    void materializeStream(img, mediaId, info);
     container.append(img);
     return container;
   }
@@ -396,10 +412,41 @@ function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLEl
   const player = document.createElement(tag) as HTMLVideoElement | HTMLAudioElement;
   player.controls = true;
   player.preload = "none";
-  player.src = `/_local/media/${encodeURIComponent(mediaId)}`;
+  void materializeStream(player, mediaId, info);
   player.setAttribute("playsinline", "");
   container.append(player);
   return container;
+}
+
+function clearStreamSources(): void {
+  for (const node of elements.editorHost.querySelectorAll<HTMLImageElement | HTMLMediaElement>("[data-sw-media]")) {
+    node.removeAttribute("src");
+    if (node instanceof HTMLMediaElement) { node.pause(); node.load(); }
+  }
+}
+
+function refreshStreamSources(): void {
+  for (const node of elements.editorHost.querySelectorAll<HTMLImageElement | HTMLMediaElement>("[data-sw-media]")) {
+    const mediaId = node.dataset.swMedia!;
+    const info = mediaInfo(mediaId);
+    if (info) void materializeStream(node, mediaId, info);
+  }
+}
+
+async function materializeStream(node: HTMLImageElement | HTMLMediaElement, mediaId: string, info: MediaInfo): Promise<void> {
+  node.dataset.swMedia = mediaId;
+  const generation = state.sessionGeneration;
+  let barrier = mediaReady;
+  while (await barrier) {
+    if (generation !== state.sessionGeneration || !state.unlocked || mediaInfo(mediaId) !== info) return;
+    if (barrier !== mediaReady) { barrier = mediaReady; continue; }
+    if (!node.isConnected || !serviceWorkerBridge?.ready) return;
+    const src = `/_local/media/${encodeURIComponent(mediaId)}`;
+    // Reassigning an unchanged player source restarts resource selection/playback.
+    // Images still need same-URL retries when a fresh reference initially returned 404.
+    if (!(node instanceof HTMLMediaElement) || node.getAttribute("src") !== src) node.src = src;
+    return;
+  }
 }
 
 async function materializeImage(
@@ -408,6 +455,7 @@ async function materializeImage(
   info: MediaInfo,
 ): Promise<void> {
   if (!state.bridge || !state.unlocked) return;
+  const generation = state.sessionGeneration;
   const cached = state.objectUrls.get(mediaId);
   if (cached) {
     img.src = cached;
@@ -417,8 +465,8 @@ async function materializeImage(
   // deliverable after the reference save lands (spec §11.3 step 6). Retry a few
   // times before giving up so a fresh insertion is not stuck on a placeholder.
   for (let attempt = 0; attempt < 4; attempt++) {
-    const bridge = state.bridge;
-    if (!bridge) return;
+    const bridge: CryptoBridge | null = state.bridge;
+    if (!bridge || generation !== state.sessionGeneration || mediaInfo(mediaId) !== info) return;
     try {
       const blob = await fetchDecrypted({
         mediaId,
@@ -426,6 +474,7 @@ async function materializeImage(
         documentId: state.documentId,
         bridge,
       });
+      if (generation !== state.sessionGeneration || state.bridge !== bridge || mediaInfo(mediaId) !== info) return;
       const url = URL.createObjectURL(blob);
       state.objectUrls.set(mediaId, url);
       img.src = url;
@@ -448,7 +497,9 @@ async function materializeImage(
 
 async function attachFiles(files: File[], position: number): Promise<void> {
   if (!state.bridge || !state.unlocked || !state.editor) return;
+  const generation = state.sessionGeneration;
   for (const file of files) {
+    if (generation !== state.sessionGeneration || !state.bridge || !state.editor) return;
     let kind;
     try {
       kind = classify(file);
@@ -462,8 +513,9 @@ async function attachFiles(files: File[], position: number): Promise<void> {
     state.attaching.set(placeholderId, entry);
     renderAttachProgress();
 
+    let result: Awaited<ReturnType<typeof uploadFile>> | undefined;
     try {
-      const result = await uploadFile({
+      result = await uploadFile({
         file,
         kind,
         documentId: state.documentId,
@@ -471,13 +523,15 @@ async function attachFiles(files: File[], position: number): Promise<void> {
         signal: controller.signal,
         onStarted: (mediaId) => {
           entry.mediaId = mediaId;
-          syncServiceWorkerMedia();
+          if (generation === state.sessionGeneration) void syncServiceWorkerMedia();
         },
         onProgress: (fraction) => {
           entry.progress = fraction;
           renderAttachProgress();
         },
       });
+      controller.signal.throwIfAborted();
+      if (generation !== state.sessionGeneration || !state.editor) return;
       // Register metadata. The insertion itself happens at an IME safe point;
       // if the surrounding text was deleted meanwhile, the position collapses
       // to the current selection instead of resurrecting a stale offset (§9.7).
@@ -485,14 +539,26 @@ async function attachFiles(files: File[], position: number): Promise<void> {
       entry.mediaId = result.mediaId;
       entry.kind = result.info.kind;
       entry.done = true;
+      await syncServiceWorkerMedia();
+      controller.signal.throwIfAborted();
+      if (generation !== state.sessionGeneration || !state.editor) return;
+      if (mediaInfo(result.mediaId) !== result.info) {
+        throw new Error("文書が更新されました。添付をやり直してください。");
+      }
       // Insertion happens here (the upload completed); when composing, the
       // editor defers the structural change to the next safe point internally.
       state.editor.insertMedia(result.mediaId, result.info.kind, clampPosition(entry.position));
       state.sync?.noteCommittedChange();
       state.attaching.delete(placeholderId);
       renderAttachProgress();
-      syncServiceWorkerMedia();
     } catch (error) {
+      if (generation !== state.sessionGeneration) return;
+      if (controller.signal.aborted && result && mediaInfo(result.mediaId) === result.info) {
+        // Revoke local/SW metadata, but leave completed unreferenced ciphertext
+        // to the server's normal GC grace instead of destructively deleting it.
+        delete state.document.media[result.mediaId];
+        void syncServiceWorkerMedia();
+      }
       state.attaching.delete(placeholderId);
       renderAttachProgress();
       if ((error as Error).name !== "AbortError") {
@@ -567,10 +633,13 @@ function setSyncState(next: SyncState, detail?: string): void {
 async function startSession(vault: UnlockedVault): Promise<void> {
   state.sessionGeneration += 1;
   const generation = state.sessionGeneration;
+  serviceWorkerBridge?.reset();
+  mediaReady = Promise.resolve(false);
 
   try {
     setSyncState("saving", "読み込み中");
     const session = await api.session();
+    if (generation !== state.sessionGeneration) return;
     const bridge = new CryptoBridge(cryptoWorkerUrl());
     if (window.__txtDebug) window.__txtDebug.step = "session:api-done";
 
@@ -578,6 +647,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     // the workers so the AAD matches. This must be an unconditional fetch: a
     // 304 from a stale validator would leave us without a payload to decrypt.
     const first = await api.document();
+    if (generation !== state.sessionGeneration) { bridge.lock(); return; }
     if (!first.data) throw new Error("文書を取得できません。");
     state.documentId = first.data.documentId;
     if (window.__txtDebug) window.__txtDebug.step = "session:document-done";
@@ -588,6 +658,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       documentId: state.documentId,
       keyVersion: first.data.keyVersion,
     });
+    if (generation !== state.sessionGeneration) { bridge.lock(); return; }
     if (window.__txtDebug) window.__txtDebug.step = "session:unlocked";
 
     // Keep the vault on this device so the next visit does not require a passkey
@@ -608,6 +679,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       // requires the passkey again next time.
     }
 
+    if (generation !== state.sessionGeneration) { bridge.lock(); return; }
     const document = await bridge.decryptDocument({
       mutationId: first.data.mutationId,
       encryptedRevision: first.data.encryptedRevision,
@@ -618,9 +690,12 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     });
     if (window.__txtDebug) window.__txtDebug.step = "session:decrypted";
 
+  if (generation !== state.sessionGeneration) { bridge.lock(); return; }
   state.unlocked = vault;
   state.bridge = bridge;
   state.document = document;
+  await setupServiceWorker(vault);
+  if (generation !== state.sessionGeneration) return;
 
   let editor = state.editor;
   if (!editor) {
@@ -671,7 +746,10 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         return pruneUnreferencedMedia(model);
       },
       applyRemote: (remote, { fromAdoption }) => {
+        if (generation !== state.sessionGeneration) return;
+        clearStreamSources();
         state.document = remote;
+        void syncServiceWorkerMedia();
         if (fromAdoption) {
           // Clearing history avoids undoing back into the previous version
           // (spec §9.7).
@@ -681,7 +759,6 @@ async function startSession(vault: UnlockedVault): Promise<void> {
           state.editor?.applyRemoteDocument(remote);
         }
         updateEmptyHint();
-        syncServiceWorkerMedia();
         // A remote copy that carried unreferenced media entries was opened with
         // them dropped; persist the repaired model so the stored document stops
         // being broken for every other client (spec §8).
@@ -692,6 +769,13 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       onState: (nextState, detail) => {
         if (generation !== state.sessionGeneration) return;
         setSyncState(nextState, detail);
+        if (nextState === "saved") {
+          for (const img of elements.editorHost.querySelectorAll<HTMLImageElement>("img[data-sw-media]")) {
+            const mediaId = img.dataset.swMedia!;
+            const info = mediaInfo(mediaId);
+            if (info && img.complete && img.naturalWidth === 0) void materializeStream(img, mediaId, info);
+          }
+        }
       },
       onConflict: async ({ local, remote, remoteEtag }) => {
         const localPreview = window.document.createElement("pre");
@@ -747,6 +831,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     documentId: state.documentId,
     keyVersion: vault.keyVersion,
   });
+  if (generation !== state.sessionGeneration) return;
   if (draft && draft.mutationId) {
     const decision = await showDialog({
       title: draft.provisional ? "未確定の入力が残っています" : "未同期の入力が残っています",
@@ -756,6 +841,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         { label: "破棄する", value: "discard", primary: false },
       ],
     });
+    if (generation !== state.sessionGeneration) return;
     if (decision === "accept") {
       try {
         const recovered = pruneUnreferencedMedia(
@@ -771,7 +857,11 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         } else {
           // The app state must carry the recovered media dictionary: the editor
           // resolves node metadata through `state.document` (spec §10.6).
+          clearStreamSources();
           state.document = recovered;
+          await syncServiceWorkerMedia();
+          if (generation !== state.sessionGeneration) return;
+          if (state.document !== recovered) throw new Error("draft superseded by remote document");
           editor.applyRemoteDocument(recovered);
           updateEmptyHint();
           // Save from the base the draft was written against: if the server has
@@ -791,11 +881,12 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     }
   }
 
-  await setupServiceWorker(vault);
+  if (generation !== state.sessionGeneration) return;
   showApp();
   setSyncState("idle");
   editor.focus();
   } catch (error) {
+    if (generation !== state.sessionGeneration) return;
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
     setSyncState("decrypt-failed", "内容を開けません。データは変更していません。");
@@ -821,35 +912,57 @@ async function startSession(vault: UnlockedVault): Promise<void> {
 /* ------------------------------------------------------------------ */
 
 async function setupServiceWorker(vault: UnlockedVault): Promise<void> {
-  if (!("serviceWorker" in navigator)) return;
+  if (!serviceWorkerBridge) return;
+  const generation = state.sessionGeneration;
+  const swGeneration = ++state.swGeneration;
+  state.serviceWorkerReady = false;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-    const registration = await navigator.serviceWorker.ready;
-    state.serviceWorkerReady = true;
-    const target = registration.active ?? navigator.serviceWorker.controller;
-    if (!target) return;
-    state.swGeneration += 1;
-    target.postMessage({
+    // Registration can stall independently of controller/ACK waiters.
+    await Promise.race([
+      navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" }),
+      new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Service Worker timeout")), 8000); }),
+    ]);
+    if (generation !== state.sessionGeneration || swGeneration !== state.swGeneration || state.unlocked !== vault) return;
+    mediaReady = serviceWorkerBridge.start({
       type: "txt-handshake",
-      sessionGeneration: state.swGeneration,
+      sessionGeneration: swGeneration,
       accountId: vault.accountId,
       documentId: state.documentId,
       keyVersion: vault.keyVersion,
       vaultKey: toBase64Url(vault.vaultKey),
       media: state.document.media,
     });
+    await mediaReady;
+    if (generation !== state.sessionGeneration || swGeneration !== state.swGeneration) return;
+    // Claim/handshake can overlap a newer document dictionary.
+    await syncServiceWorkerMedia();
   } catch {
-    // Without the Service Worker, large media playback is unavailable; the
-    // small-blob path stays available and nothing else degrades (§11.6).
-    state.serviceWorkerReady = false;
+    // Keep the small-blob fallback available; never materialize an unowned URL.
+    if (generation === state.sessionGeneration && swGeneration === state.swGeneration) state.serviceWorkerReady = false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-function syncServiceWorkerMedia(): void {
-  if (!state.serviceWorkerReady) return;
-  const target = navigator.serviceWorker.controller;
-  target?.postMessage({ type: "txt-media-update", media: state.document.media });
+function syncServiceWorkerMedia(): Promise<boolean> {
+  const generation = state.sessionGeneration;
+  const pending = serviceWorkerBridge?.updateMedia(state.document.media) ?? Promise.resolve(false);
+  mediaReady = pending;
+  state.serviceWorkerReady = false;
+  void pending.then((acknowledged) => {
+    if (generation !== state.sessionGeneration || mediaReady !== pending) return;
+    state.serviceWorkerReady = acknowledged && (serviceWorkerBridge?.ready ?? false);
+    if (state.serviceWorkerReady) refreshStreamSources();
+  });
+  return pending;
 }
+
+if (serviceWorkerBridge) navigator.serviceWorker.addEventListener("controllerchange", () => {
+  clearStreamSources();
+  state.serviceWorkerReady = false;
+  if (state.unlocked) void setupServiceWorker(state.unlocked);
+});
 
 /* ------------------------------------------------------------------ */
 /* Lock policy (spec §6.4)                                             */
@@ -865,6 +978,11 @@ function lockVault(reason: string): void {
   if (state.editor && !state.editor.isSafePoint()) return;
   dismissCoach?.();
   state.sessionGeneration += 1;
+  serviceWorkerBridge?.reset();
+  mediaReady = Promise.resolve(false);
+  for (const entry of state.attaching.values()) entry.controller.abort();
+  state.attaching.clear();
+  renderAttachProgress();
   state.sync?.stop();
   state.sync = null;
   state.bridge?.lock();
@@ -873,7 +991,7 @@ function lockVault(reason: string): void {
   state.unlocked = null;
   for (const url of state.objectUrls.values()) URL.revokeObjectURL(url);
   state.objectUrls.clear();
-  navigator.serviceWorker.controller?.postMessage({ type: "txt-lock" });
+  state.document = { schemaVersion: 1, blocks: [], media: {} };
   state.editor?.replaceDocument({ schemaVersion: 1, blocks: [{ id: crypto.randomUUID(), type: "text", text: "" }], media: {} });
   void accountId;
   showGate({
@@ -1201,6 +1319,9 @@ async function showMoreMenu(): Promise<void> {
         await clearAccountDrafts(state.unlocked.accountId);
         await forgetKeptVaultKey(state.unlocked.accountId).catch(() => undefined);
       }
+      state.sessionGeneration += 1;
+      serviceWorkerBridge?.reset();
+      mediaReady = Promise.resolve(false);
       state.unlocked = null;
       state.bridge?.lock();
       state.bridge = null;
@@ -1224,6 +1345,9 @@ async function showMoreMenu(): Promise<void> {
           await api.deleteAccount(crypto.randomUUID());
           await clearAccountDrafts(state.unlocked.accountId);
           await forgetAllKeptVaultKeys().catch(() => undefined);
+          state.sessionGeneration += 1;
+          serviceWorkerBridge?.reset();
+          mediaReady = Promise.resolve(false);
           window.location.reload();
         } catch (error) {
           toast((error as Error).message);
