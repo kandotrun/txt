@@ -174,7 +174,7 @@ describe("stale upload GC reservation and cleanup persistence", () => {
     const parts = await real.DB.prepare(`SELECT etag FROM upload_parts WHERE media_id = ?1`).bind(stale.id).first<{ etag: string }>();
     await real.MEDIA.resumeMultipartUpload(stale.object_key, stale.upload_id!).complete([{ partNumber: 1, etag: parts!.etag }]);
     await real.DB.batch([
-      real.DB.prepare(`UPDATE media SET state = 'completing' WHERE id = ?1`).bind(stale.id),
+      real.DB.prepare(`UPDATE media SET state = 'completing', expires_at = 1 WHERE id = ?1`).bind(stale.id),
       real.DB.prepare(`UPDATE storage_usage SET used_bytes = limit_bytes - 4096 WHERE account_id = ?1`).bind(accountId),
     ]);
     const fault = failDeleteOnce();

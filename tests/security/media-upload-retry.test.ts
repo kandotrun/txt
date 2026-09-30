@@ -36,6 +36,132 @@ function installFetch(statuses: number[]) {
   return { fetch, bodies };
 }
 
+
+function installBusyPollFetch(poll: (attempt: number) => Promise<Response> | Response, lostResponse = false) {
+  const bodies: BodyInit[] = [];
+  const partTimes: number[] = [];
+  const pollTimes: number[] = [];
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/parts/1")) {
+      bodies.push(init!.body!);
+      partTimes.push(Date.now());
+      if (lostResponse && bodies.length === 1) throw new TypeError("response lost");
+      return json({ error: { code: "PART_BUSY" } }, 409);
+    }
+    if (init?.method === "GET" && url.endsWith(mediaId)) {
+      pollTimes.push(Date.now());
+      return poll(pollTimes.length);
+    }
+    if (init?.method === "DELETE") return json({ ok: true });
+    if (url.endsWith("/complete")) return json({ mediaId, state: "ready" });
+    return json({ mediaId, partCount: 1, cipherBytes: 48 }, 201);
+  });
+  vi.stubGlobal("fetch", fetch);
+  return { fetch, bodies, partTimes, pollTimes };
+}
+
+const accepted = () => json({ mediaId, state: "uploading", acceptedParts: [{ partNumber: 1, bytes: 48 }] });
+
+function cleanupCalls(fetch: ReturnType<typeof installBusyPollFetch>["fetch"]) {
+  return fetch.mock.calls.filter(([url, init]) => url.endsWith(mediaId) && init?.method === "DELETE");
+}
+
+describe("spec: PART_BUSY status polling transient failures", () => {
+  it("lost part response then poll network failure reconciles the same ciphertext", async () => {
+    vi.useFakeTimers();
+    const start = Date.now();
+    const { bodies, pollTimes, partTimes } = installBusyPollFetch((attempt) => {
+      if (attempt === 1) throw new TypeError("status network failure");
+      return accepted();
+    }, true);
+    const { promise, encryptChunk } = upload();
+    const result = promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ mediaId });
+    expect(partTimes.map((time) => time - start)).toEqual([0, 1000]);
+    expect(pollTimes.map((time) => time - start)).toEqual([2000, 4000]);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(encryptChunk).toHaveBeenCalledTimes(1);
+  });
+
+  it("HTML 502 status response retries before parsing success JSON", async () => {
+    vi.useFakeTimers();
+    const { pollTimes, bodies } = installBusyPollFetch((attempt) => attempt === 1
+      ? new Response("<html>Bad Gateway</html>", { status: 502 }) : accepted());
+    const result = upload().promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ mediaId });
+    expect(pollTimes).toHaveLength(2);
+    expect(pollTimes[1]! - pollTimes[0]!).toBe(1000);
+    expect(bodies).toHaveLength(1);
+  });
+
+  it.each([408, 429, 500, 503, 599])("HTTP %i status failure retries within the part budget", async (status) => {
+    vi.useFakeTimers();
+    const { pollTimes, bodies } = installBusyPollFetch((attempt) => attempt === 1
+      ? json({ error: { code: "STATUS_TEMPORARY" } }, status) : accepted());
+    const result = upload().promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ mediaId });
+    expect(pollTimes).toHaveLength(2);
+    expect(bodies).toHaveLength(1);
+  });
+
+  it("permanent 403 with invalid error JSON fails as ApiRequestError and cleans up", async () => {
+    vi.useFakeTimers();
+    const { fetch, pollTimes, bodies } = installBusyPollFetch(() => new Response("<html>Forbidden</html>", { status: 403 }));
+    const result = upload().promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ name: "ApiRequestError", status: 403, code: "HTTP_ERROR" });
+    expect(pollTimes).toHaveLength(1);
+    expect(bodies).toHaveLength(1);
+    expect(cleanupCalls(fetch)).toHaveLength(1);
+  });
+
+  it("repeated polling failures exhaust two backoffs without resetting the budget", async () => {
+    vi.useFakeTimers();
+    const { fetch, pollTimes, bodies } = installBusyPollFetch(() => { throw new TypeError("status offline"); });
+    const result = upload().promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toBeInstanceOf(TypeError);
+    expect(pollTimes).toHaveLength(3);
+    expect(pollTimes.slice(1).map((time, index) => time - pollTimes[index]!)).toEqual([1000, 2000]);
+    expect(bodies).toHaveLength(1);
+    expect(cleanupCalls(fetch)).toHaveLength(1);
+  });
+
+  it("lost part response consumes one of the two shared poll backoffs", async () => {
+    vi.useFakeTimers();
+    const { fetch, pollTimes, bodies } = installBusyPollFetch(() => json({ error: { code: "STATUS_FAILED" } }, 503), true);
+    const result = upload().promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ status: 503 });
+    expect(pollTimes).toHaveLength(2);
+    expect(pollTimes[1]! - pollTimes[0]!).toBe(2000);
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toBe(bodies[1]);
+    expect(cleanupCalls(fetch)).toHaveLength(1);
+  });
+
+  it("abort during polling backoff stops every later poll and upload and cleans up", async () => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const { fetch, pollTimes, bodies } = installBusyPollFetch(() => {
+      setTimeout(() => controller.abort(), 100);
+      throw new TypeError("status offline");
+    });
+    const result = upload(controller.signal).promise.catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    expect(await result).toMatchObject({ name: "AbortError" });
+    expect(controller.signal.aborted).toBe(true);
+    expect(pollTimes).toHaveLength(1);
+    expect(bodies).toHaveLength(1);
+    expect(cleanupCalls(fetch)).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([url]) => url.endsWith("/complete"))).toHaveLength(0);
+  });
+});
+
 describe("spec: 大容量転送の一時的なパート失敗", () => {
   it("一時的な500を同一暗号文で再試行し、再暗号化しない", async () => {
     vi.useFakeTimers();

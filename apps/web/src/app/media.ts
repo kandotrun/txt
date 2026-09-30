@@ -137,18 +137,37 @@ async function uploadPart(mediaId: string, part: number, bytes: Uint8Array, sign
         const remaining = busyDeadline - Date.now();
         if (busyRetries >= 16 || remaining <= 0) throw error;
         await retryDelay(Math.min(1000 * 2 ** Math.min(busyRetries++, 3), 5000, remaining), signal);
-        // Keep the poll abortable without widening the shared API interface.
-        const response = await fetch(`/api/v1/media/uploads/${encodeURIComponent(mediaId)}`, {
-          method: "GET", credentials: "same-origin", signal,
-        });
-        signal.throwIfAborted();
-        const status = await response.json() as {
+        // Poll failures share the part's transient budget; retry the GET, not encryption or PUT.
+        let status: {
           state: string;
           acceptedParts: Array<{ partNumber: number; bytes: number }>;
-          error?: { code: string; message: string };
         };
-        if (!response.ok) throw new ApiRequestError(response.status,
-          status.error?.code ?? "HTTP_ERROR", status.error?.message ?? "upload status failed");
+        for (;;) {
+          signal.throwIfAborted();
+          if (Date.now() >= busyDeadline) throw error;
+          try {
+            const response = await fetch(`/api/v1/media/uploads/${encodeURIComponent(mediaId)}`, {
+              method: "GET", credentials: "same-origin", signal,
+            });
+            signal.throwIfAborted();
+            if (!response.ok) {
+              const body = await response.json().catch(() => null) as {
+                error?: { code?: unknown; message?: unknown };
+              } | null;
+              throw new ApiRequestError(response.status,
+                typeof body?.error?.code === "string" ? body.error.code : "HTTP_ERROR",
+                typeof body?.error?.message === "string" ? body.error.message : "upload status failed");
+            }
+            status = await response.json() as typeof status;
+            break;
+          } catch (pollError) {
+            signal.throwIfAborted();
+            const retryable = pollError instanceof TypeError || (pollError instanceof ApiRequestError &&
+              (pollError.status === 408 || pollError.status === 429 || pollError.status >= 500));
+            if (!retryable || transientFailures >= 2) throw pollError;
+            await retryDelay(1000 * ++transientFailures, signal);
+          }
+        }
         if (!["creating", "uploading", "completing", "ready"].includes(status.state)) {
           throw new ApiRequestError(409, "UPLOAD_CANCELLED", "upload is no longer active");
         }
@@ -255,9 +274,8 @@ export async function uploadFile(options: {
     };
     return { mediaId: start.mediaId, info };
   } catch (error) {
-    if ((error as Error).name === "AbortError") {
-      await api.cancelUpload(start.mediaId).catch(() => undefined);
-    }
+    // Both cancellation and terminal transfer failures must release the reservation.
+    await api.cancelUpload(start.mediaId).catch(() => undefined);
     throw error;
   }
 }
