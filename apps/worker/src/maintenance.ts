@@ -12,6 +12,7 @@
 
 import type { Env } from "./types.ts";
 import { nowMs } from "./util.ts";
+import { finalizeDeletion } from "./media/store.ts";
 
 const MEDIA_BATCH = 25;
 
@@ -119,31 +120,23 @@ async function cleanStaleUploads(env: Env, now: number): Promise<void> {
 
   for (const media of rows.results ?? []) {
     if (media.state !== "deleting") {
-      if (media.upload_id) {
-        try {
-          await env.MEDIA.resumeMultipartUpload(media.object_key, media.upload_id).abort();
-        } catch {
-          // Already gone; proceed to metadata cleanup.
-        }
-      }
+      // The live state/expiry claim retains quota, including legacy active rows.
       const claimed = await env.DB.prepare(
-        `UPDATE media SET state = 'deleting' WHERE id = ?1 AND state != 'ready'`,
-      )
-        .bind(media.id)
-        .run();
+        `UPDATE media SET state = 'deleting', reservation_held = 1
+          WHERE id = ?1 AND account_id = ?2
+            AND state IN ('creating','uploading','completing')
+            AND expires_at IS NOT NULL AND expires_at < ?3`,
+      ).bind(media.id, media.account_id, now).run();
       if ((claimed.meta.changes ?? 0) !== 1) continue;
+    } else {
+      // Legacy deleting rows may already be released; never normalize their flag.
+      const retry = await env.DB.prepare(
+        `SELECT 1 FROM media WHERE id = ?1 AND account_id = ?2
+          AND state = 'deleting' AND expires_at IS NOT NULL AND expires_at < ?3`,
+      ).bind(media.id, media.account_id, now).first();
+      if (!retry) continue;
     }
-    try {
-      await env.MEDIA.delete(media.object_key);
-    } catch {
-      continue;
-    }
-    await env.DB.batch([
-      env.DB.prepare(`DELETE FROM media WHERE id = ?1 AND state = 'deleting'`).bind(media.id),
-      env.DB.prepare(
-        `UPDATE storage_usage SET reserved_bytes = MAX(reserved_bytes - ?2, 0) WHERE account_id = ?1`,
-      ).bind(media.account_id, media.cipher_bytes),
-    ]);
+    await finalizeDeletion(env, media);
   }
 }
 

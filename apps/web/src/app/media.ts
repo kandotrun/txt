@@ -5,7 +5,7 @@
  * worker -> upload parts -> complete -> insert at the tracked position on an
  * IME safe point -> CAS save (only then is it visible to other devices).
  *
- * The original file is read in bounded slices: a 512MiB video is never loaded
+ * The original file is read in bounded slices: a 10GB video is never loaded
  * fully into memory for encryption.
  */
 
@@ -13,8 +13,9 @@ import { CHUNK_PLAIN_BYTES } from "../../../../packages/protocol/src/crypto.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { randomBytes } from "../../../../packages/protocol/src/crypto.ts";
 import { mediaCipherLength } from "../../../../packages/protocol/src/crypto.ts";
+import { MEDIA_SIZE_LIMITS } from "../../../../packages/protocol/src/media-limits.ts";
 import type { MediaInfo, MediaKind } from "../../../../packages/protocol/src/document.ts";
-import { api } from "./api.ts";
+import { api, ApiRequestError } from "./api.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
 
 const IMAGE_TYPES = new Set([
@@ -38,11 +39,7 @@ const AUDIO_TYPES = new Set([
   "audio/x-m4a",
 ]);
 
-const SIZE_LIMITS: Record<MediaKind, number> = {
-  image: 20 * 1024 * 1024,
-  audio: 100 * 1024 * 1024,
-  video: 512 * 1024 * 1024,
-};
+const SIZE_LIMITS: Record<MediaKind, number> = MEDIA_SIZE_LIMITS;
 
 export const PART_BYTES = 8_388_736; // 8 chunks (spec §11.1)
 
@@ -59,11 +56,11 @@ export class MediaRejectedError extends Error {
 export function classify(file: File): MediaKind {
   const type = file.type.toLowerCase();
   if (IMAGE_TYPES.has(type)) {
-    if (file.size > SIZE_LIMITS.image) throw new MediaRejectedError("画像は20MiBまでです。");
+    if (file.size > SIZE_LIMITS.image) throw new MediaRejectedError("画像は100MBまでです。");
     return "image";
   }
   if (VIDEO_TYPES.has(type)) {
-    if (file.size > SIZE_LIMITS.video) throw new MediaRejectedError("動画は512MiBまでです。");
+    if (file.size > SIZE_LIMITS.video) throw new MediaRejectedError("動画は10GBまでです。");
     return "video";
   }
   if (AUDIO_TYPES.has(type)) {
@@ -106,6 +103,67 @@ async function encryptChunk(options: {
 export interface UploadResult {
   mediaId: string;
   info: MediaInfo;
+}
+
+/** Wait cooperatively: abort also prevents status polls and cleanup is handled by uploadFile. */
+async function retryDelay(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => { clearTimeout(timer); reject(signal.reason); };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+/** Retry only the already-encrypted, idempotent part; never regenerate a nonce. */
+async function uploadPart(mediaId: string, part: number, bytes: Uint8Array, signal: AbortSignal): Promise<void> {
+  let transientFailures = 0;
+  let busyRetries = 0;
+  let busyDeadline = 0;
+  for (;;) {
+    signal.throwIfAborted();
+    try {
+      await api.uploadPart(mediaId, part, bytes, signal);
+      return;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof ApiRequestError && error.status === 409 && error.code === "PART_BUSY") {
+        // A response-lost request can retain the server's 60-second lease.
+        // Give it one lease plus a small margin, with a separate bounded budget.
+        if (busyDeadline === 0) busyDeadline = Date.now() + 65_000;
+        const remaining = busyDeadline - Date.now();
+        if (busyRetries >= 16 || remaining <= 0) throw error;
+        await retryDelay(Math.min(1000 * 2 ** Math.min(busyRetries++, 3), 5000, remaining), signal);
+        // Keep the poll abortable without widening the shared API interface.
+        const response = await fetch(`/api/v1/media/uploads/${encodeURIComponent(mediaId)}`, {
+          method: "GET", credentials: "same-origin", signal,
+        });
+        signal.throwIfAborted();
+        const status = await response.json() as {
+          state: string;
+          acceptedParts: Array<{ partNumber: number; bytes: number }>;
+          error?: { code: string; message: string };
+        };
+        if (!response.ok) throw new ApiRequestError(response.status,
+          status.error?.code ?? "HTTP_ERROR", status.error?.message ?? "upload status failed");
+        if (!["creating", "uploading", "completing", "ready"].includes(status.state)) {
+          throw new ApiRequestError(409, "UPLOAD_CANCELLED", "upload is no longer active");
+        }
+        if (status.acceptedParts.some((accepted) => accepted.partNumber === part && accepted.bytes === bytes.byteLength)) return;
+        if (status.state !== "creating" && status.state !== "uploading") {
+          throw new ApiRequestError(409, "UPLOAD_CONFLICT", "upload no longer accepts parts");
+        }
+        continue;
+      }
+      const retryable = error instanceof TypeError || (error instanceof ApiRequestError &&
+        (error.status === 408 || error.status === 429 || error.status >= 500));
+      if (!retryable || transientFailures >= 2) throw error;
+      await retryDelay(1000 * ++transientFailures, signal);
+    }
+  }
 }
 
 /**
@@ -177,7 +235,7 @@ export async function uploadFile(options: {
       if (partOffset !== expected) {
         throw new Error("暗号化したパートの長さが一致しません。");
       }
-      await api.uploadPart(start.mediaId, partIndex + 1, partBuffer);
+      await uploadPart(start.mediaId, partIndex + 1, partBuffer, options.signal);
       uploadedParts += 1;
       options.onProgress(uploadedParts / partCount);
     }

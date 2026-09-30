@@ -7,10 +7,13 @@
  * built from real ES256 keys, so signature verification actually runs.
  */
 
-import { SELF, env } from "cloudflare:test";
+import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { encodeBase64Url } from "../../apps/worker/src/document/store.ts";
+import worker from "../../apps/worker/src/index.ts";
+import type { Env } from "../../apps/worker/src/types.ts";
+import { cancelUpload, completeUpload, loadUpload } from "../../apps/worker/src/media/store.ts";
 
 const BASE = "https://txt.2-38.com";
 
@@ -285,9 +288,16 @@ interface RegisteredAccount {
   cookie: string;
 }
 
+let registrationSequence = 0;
+
 /** Runs register/options + register/verify and returns the pending session. */
 async function registerAccount(): Promise<RegisteredAccount> {
-  const optionsResponse = await postJson("/api/v1/auth/register/options", {});
+  // 各テストの合成クライアントを分離し、実運用の登録制限は変更しない。
+  const registrationHeaders = {
+    ...webHeaders,
+    "cf-connecting-ip": `2001:db8::${(++registrationSequence).toString(16)}`,
+  };
+  const optionsResponse = await postJson("/api/v1/auth/register/options", {}, registrationHeaders);
   expect(optionsResponse.status).toBe(200);
   const optionsBody = (await optionsResponse.json()) as {
     accountId: string;
@@ -302,7 +312,7 @@ async function registerAccount(): Promise<RegisteredAccount> {
     userHandle,
   });
 
-  const verifyResponse = await postJson("/api/v1/auth/register/verify", { response });
+  const verifyResponse = await postJson("/api/v1/auth/register/verify", { response }, registrationHeaders);
   expect(verifyResponse.status).toBe(200);
   const cookie = cookieFrom(verifyResponse);
   expect(cookie).toBeTruthy();
@@ -674,24 +684,361 @@ describe("media upload", () => {
     etag = response.headers.get("etag") as string;
   });
 
-  async function startUpload(cipherBytes: number): Promise<string> {
-    const response = await postJson(
+  // 公開仕様の固定値。実装の定数を参照せず、上限や整数幅の回帰を検出する。
+  const MAX_CIPHER_BYTES = 10_000_152_592;
+  const ACCOUNT_LIMIT_BYTES = 10_737_418_240;
+  const NORMAL_PART_BYTES = 8_388_736;
+
+  function requestUpload(cipherBytes: number, clientUploadId = crypto.randomUUID()) {
+    return postJson(
       "/api/v1/media/uploads",
-      {
-        clientUploadId: crypto.randomUUID(),
-        cipherBytes,
-        cryptoFormat: 1,
-        chunkBytes: 1_048_592,
-      },
+      { clientUploadId, cipherBytes, cryptoFormat: 1, chunkBytes: 1_048_592 },
       webHeaders,
       account.cookie,
     );
+  }
+
+  async function startUpload(cipherBytes: number): Promise<string> {
+    const response = await requestUpload(cipherBytes);
     expect(response.status).toBe(201);
     const body = (await response.json()) as { mediaId: string };
     return body.mediaId;
   }
 
-  it("reserves capacity and rejects a start beyond the account limit", async () => {
+  function partHeaders() {
+    return { ...webHeaders, "content-type": "application/octet-stream", cookie: account.cookie };
+  }
+
+  function uploadPart(mediaId: string, partNumber: number, bytes: number) {
+    return SELF.fetch(`${BASE}/api/v1/media/uploads/${mediaId}/parts/${partNumber}`, {
+      method: "PUT", headers: partHeaders(), body: new Uint8Array(bytes),
+    });
+  }
+
+  async function usage() {
+    return TEST_ENV.DB.prepare(
+      `SELECT used_bytes, reserved_bytes, limit_bytes, typeof(reserved_bytes) AS reserved_type
+         FROM storage_usage WHERE account_id = ?1`,
+    ).bind(account.accountId).first<{
+      used_bytes: number; reserved_bytes: number | string; limit_bytes: number; reserved_type: string;
+    }>();
+  }
+
+  async function mediaRows() {
+    const rows = await TEST_ENV.DB.prepare(
+      `SELECT id, state, cipher_bytes FROM media WHERE account_id = ?1 ORDER BY id`,
+    ).bind(account.accountId).all();
+    return rows.results;
+  }
+
+  it("spec: plans the maximum 10GB ciphertext and accepts its final partial part without truncation", async () => {
+    // 10GB 全体は確保せず、開始・D1 の64bit値・最終パートだけを実際に検証する。
+    const response = await requestUpload(MAX_CIPHER_BYTES);
+    expect(response.status).toBe(201);
+    const body = await response.json() as { mediaId: string };
+    expect(body).toEqual({
+      mediaId: expect.any(String), state: "uploading", partCount: 1193,
+      partBytes: NORMAL_PART_BYTES, cipherBytes: MAX_CIPHER_BYTES, replayed: false,
+    });
+    expect(await usage()).toEqual({
+      used_bytes: 0, reserved_bytes: MAX_CIPHER_BYTES,
+      limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+    });
+    expect((await mediaRows())?.[0]?.cipher_bytes).toBe(MAX_CIPHER_BYTES);
+
+    expect((await uploadPart(body.mediaId, 1193, 779_279)).status).toBe(422);
+    const last = await uploadPart(body.mediaId, 1193, 779_280);
+    expect(last.status).toBe(200);
+    expect(await last.json()).toEqual({ partNumber: 1193, bytes: 779_280, state: "accepted" });
+    expect((await uploadPart(body.mediaId, 1194, 16)).status).toBe(422);
+    const status = await SELF.fetch(`${BASE}/api/v1/media/uploads/${body.mediaId}`, {
+      headers: { cookie: account.cookie },
+    });
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({
+      mediaId: body.mediaId, state: "uploading", cipherBytes: MAX_CIPHER_BYTES,
+      partCount: 1193, acceptedParts: [{ partNumber: 1193, bytes: 779_280 }],
+    });
+  });
+
+  it("spec: rejects maximum ciphertext plus one byte without creating a reservation", async () => {
+    const before = await usage();
+    const response = await requestUpload(MAX_CIPHER_BYTES + 1);
+    expect(response.status).toBe(413);
+    expect(await usage()).toEqual(before);
+    expect(await mediaRows()).toEqual([]);
+  });
+
+  it("spec: enforces remaining capacity against already used bytes without changing the quota", async () => {
+    await TEST_ENV.DB.prepare(`UPDATE storage_usage SET used_bytes = ?2 WHERE account_id = ?1`)
+      .bind(account.accountId, ACCOUNT_LIMIT_BYTES - MAX_CIPHER_BYTES + 1).run();
+    const before = await usage();
+    const denied = await requestUpload(MAX_CIPHER_BYTES);
+    expect(denied.status).toBe(413);
+    expect(await usage()).toEqual(before);
+    expect(await mediaRows()).toEqual([]);
+    const allowed = await requestUpload(MAX_CIPHER_BYTES - 1);
+    expect(allowed.status).toBe(201);
+    expect(await usage()).toEqual({ ...before, reserved_bytes: MAX_CIPHER_BYTES - 1 });
+  });
+
+  it("spec: concurrent reservations cannot exceed the account hard cap", async () => {
+    const cipherBytes = 200_000_000;
+    await TEST_ENV.DB.prepare(`UPDATE storage_usage SET used_bytes = ?2 WHERE account_id = ?1`)
+      .bind(account.accountId, ACCOUNT_LIMIT_BYTES - 2 * cipherBytes).run();
+    const responses = await Promise.all(Array.from({ length: 4 }, () => requestUpload(cipherBytes)));
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 201, 413, 413]);
+    expect(await usage()).toEqual({
+      used_bytes: ACCOUNT_LIMIT_BYTES - 2 * cipherBytes, reserved_bytes: 2 * cipherBytes,
+      limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+    });
+    expect(await mediaRows()).toHaveLength(2);
+  });
+
+  it("spec: repeated and changed starts never double-reserve while distinct uploads accumulate", async () => {
+    const clientUploadId = crypto.randomUUID();
+    const first = await requestUpload(4096, clientUploadId);
+    expect(first.status).toBe(201);
+    const original = await first.json() as { mediaId: string };
+    const retry = await requestUpload(4096, clientUploadId);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ mediaId: original.mediaId, replayed: true });
+    expect((await requestUpload(4097, clientUploadId)).status).toBe(409);
+    await startUpload(8192);
+    expect(await usage()).toEqual({
+      used_bytes: 0, reserved_bytes: 12_288,
+      limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+    });
+    expect(await mediaRows()).toHaveLength(2);
+  });
+
+  it("spec: cancellation releases only its own reservation and repeated cancellation cannot subtract again", async () => {
+    const cancelledId = await startUpload(4096);
+    const remainingId = await startUpload(8192);
+    const cancel = () => SELF.fetch(`${BASE}/api/v1/media/uploads/${cancelledId}`, {
+      method: "DELETE", headers: { ...webHeaders, cookie: account.cookie },
+    });
+    expect((await cancel()).status).toBe(200);
+    expect((await cancel()).status).toBe(404);
+    expect(await usage()).toEqual({
+      used_bytes: 0, reserved_bytes: 8192,
+      limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+    });
+    expect(await mediaRows()).toEqual([{ id: remainingId, state: "uploading", cipher_bytes: 8192 }]);
+  });
+
+  it("spec: concurrent duplicate DELETE releases its reservation exactly once in real D1", async () => {
+    const cancelledId = await startUpload(4096);
+    const remainingId = await startUpload(8192);
+    let arrivals = 0;
+    let release!: () => void;
+    const snapshots = new Promise<void>((resolve) => { release = resolve; });
+    const db = new Proxy(TEST_ENV.DB, {
+      get(target, property) {
+        if (property === "prepare") return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (!sql.includes("SELECT * FROM media WHERE id = ?1 AND account_id = ?2")) return statement;
+          return { bind(...values: unknown[]) {
+            const bound = statement.bind(...values);
+            return { async first<T>() {
+              const row = await bound.first<T>();
+              if (values[0] === cancelledId) { if (++arrivals === 2) release(); await snapshots; }
+              return row;
+            } };
+          } } as unknown as D1PreparedStatement;
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    // HTTP handler に同じ uploading snapshot を渡す。SQL 実行・transaction は実 D1 のまま。
+    const responses = await Promise.all(Array.from({ length: 2 }, () => worker.fetch(new Request(
+      `${BASE}/api/v1/media/uploads/${cancelledId}`,
+      { method: "DELETE", headers: { ...webHeaders, cookie: account.cookie } },
+    ), { ...env, DB: db } as Env, createExecutionContext())));
+    expect(responses.some((response) => response.status === 200)).toBe(true);
+    expect(responses.every((response) => [200, 404, 409].includes(response.status))).toBe(true);
+    expect(await usage()).toMatchObject({ used_bytes: 0, reserved_bytes: 8192 });
+    expect(await mediaRows()).toEqual([{ id: remainingId, state: "uploading", cipher_bytes: 8192 }]);
+  });
+
+  it("spec: stale cancellation after completion cannot delete ready ciphertext or subtract quota", async () => {
+    const completedId = await startUpload(4096);
+    await startUpload(8192);
+    expect((await uploadPart(completedId, 1, 4096)).status).toBe(200);
+    const stale = await loadUpload(env as Env, completedId, account.accountId);
+    await completeUpload(env as Env, { media: stale, now: Date.now() });
+    const result = await cancelUpload(env as Env, { media: stale, now: Date.now() }).catch((error) => error);
+    expect.soft(result).toMatchObject({ status: 409 });
+    expect.soft(await usage()).toMatchObject({ used_bytes: 4096, reserved_bytes: 8192 });
+    expect.soft(await loadUpload(env as Env, completedId, account.accountId).catch(() => null)).toMatchObject({ state: "ready" });
+    expect((await TEST_ENV.MEDIA.head(`cipher/${completedId}`))?.size).toBe(4096);
+  });
+
+  it("spec: cancellation racing an in-flight completion preserves the completion and other quota", async () => {
+    const completedId = await startUpload(4096);
+    await startUpload(8192);
+    expect((await uploadPart(completedId, 1, 4096)).status).toBe(200);
+    const stale = await loadUpload(env as Env, completedId, account.accountId);
+    let entered!: () => void;
+    let release!: () => void;
+    const completing = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    // D1 と R2 は実物。R2 complete 境界だけで停止し、古い uploading snapshot の取消を競合させる。
+    const bucket = {
+      resumeMultipartUpload(key: string, uploadId: string) {
+        const multipart = TEST_ENV.MEDIA.resumeMultipartUpload(key, uploadId);
+        return { async complete(parts: R2UploadedPart[]) { entered(); await gate; return multipart.complete(parts); } };
+      },
+      head: TEST_ENV.MEDIA.head.bind(TEST_ENV.MEDIA),
+    } as unknown as R2Bucket;
+    const completion = completeUpload({ ...env, MEDIA: bucket } as Env, { media: stale, now: Date.now() })
+      .then((value) => value, (error) => error);
+    await completing;
+    const cancellation = await cancelUpload(env as Env, { media: stale, now: Date.now() }).catch((error) => error);
+    release();
+    expect.soft(cancellation).toMatchObject({ status: 409 });
+    expect.soft(await completion).toMatchObject({ state: "ready" });
+    expect.soft(await usage()).toMatchObject({ used_bytes: 4096, reserved_bytes: 8192 });
+    expect((await TEST_ENV.MEDIA.head(`cipher/${completedId}`))?.size).toBe(4096);
+  });
+
+  it.each([undefined, "1"])(
+    "spec: bounds actual upload-start JSON stream when Content-Length is %s before any media writes",
+    async (declaredLength) => {
+      const before = await usage();
+      let reads = 0;
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (++reads <= 3) controller.enqueue(new Uint8Array(65536));
+          else controller.close();
+        },
+        cancel() { cancelled = true; },
+      }, { highWaterMark: 0 });
+      const headers = new Headers({ ...webHeaders, cookie: account.cookie });
+      if (declaredLength !== undefined) headers.set("content-length", declaredLength);
+      const response = await worker.fetch(new Request(`${BASE}/api/v1/media/uploads`, {
+        method: "POST", headers, body,
+      }), env as Env, createExecutionContext());
+      expect.soft(response.status).toBe(413);
+      expect.soft(reads).toBe(2);
+      expect.soft(cancelled).toBe(true);
+      expect(await usage()).toEqual(before);
+      expect(await mediaRows()).toEqual([]);
+    },
+  );
+
+  it("spec: completion moves reserved bytes to used once while preserving other reservations", async () => {
+    await TEST_ENV.DB.prepare(`UPDATE storage_usage SET used_bytes = 12345 WHERE account_id = ?1`)
+      .bind(account.accountId).run();
+    const completedId = await startUpload(4096);
+    await startUpload(8192);
+    expect((await uploadPart(completedId, 1, 4096)).status).toBe(200);
+    for (let retry = 0; retry < 2; retry++) {
+      const response = await postJson(`/api/v1/media/uploads/${completedId}/complete`, {}, webHeaders, account.cookie);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ state: "ready", cipherBytes: 4096 });
+      expect(await usage()).toEqual({
+        used_bytes: 12345 + 4096, reserved_bytes: 8192,
+        limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+      });
+    }
+  });
+
+  it.each(["legacy-account-uuid", -4096, 1.5])(
+    "spec: repairs an idle invalid reservation counter %s without touching used bytes or the account limit",
+    async (invalid) => {
+      await TEST_ENV.DB.prepare(
+        `UPDATE storage_usage SET reserved_bytes = ?2, used_bytes = 12345 WHERE account_id = ?1`,
+      ).bind(account.accountId, invalid).run();
+      await startUpload(4096);
+      expect(await usage()).toEqual({
+        used_bytes: 12345, reserved_bytes: 4096,
+        limit_bytes: ACCOUNT_LIMIT_BYTES, reserved_type: "integer",
+      });
+    },
+  );
+
+  for (const state of ["creating", "uploading", "completing", "deleting"]) {
+    it.each(["legacy-account-uuid", -4096, 1.5])(
+      `spec: fails closed for an invalid %s reservation with a ${state} upload`,
+      async (invalid) => {
+        const mediaId = await startUpload(4096);
+        await TEST_ENV.DB.batch([
+          TEST_ENV.DB.prepare(`UPDATE media SET state = ?2 WHERE id = ?1`).bind(mediaId, state),
+          TEST_ENV.DB.prepare(
+            `UPDATE storage_usage SET reserved_bytes = ?2, used_bytes = 12345 WHERE account_id = ?1`,
+          ).bind(account.accountId, invalid),
+        ]);
+        const beforeUsage = await usage();
+        const beforeMedia = await mediaRows();
+        const response = await requestUpload(8192);
+        expect(response.status).toBe(409);
+        expect(await response.json()).toMatchObject({ error: { code: "STORAGE_USAGE_INVALID" } });
+        expect(await usage()).toEqual(beforeUsage);
+        expect(await mediaRows()).toEqual(beforeMedia);
+      },
+    );
+  }
+
+  async function expectNoPartWritten(mediaId: string) {
+    const parts = await TEST_ENV.DB.prepare(`SELECT * FROM upload_parts WHERE media_id = ?1`)
+      .bind(mediaId).all();
+    expect(parts.results).toEqual([]);
+    expect(await TEST_ENV.MEDIA.head(`cipher/${mediaId}`)).toBeNull();
+    const status = await SELF.fetch(`${BASE}/api/v1/media/uploads/${mediaId}`, {
+      headers: { cookie: account.cookie },
+    });
+    expect(await status.json()).toMatchObject({ acceptedParts: [] });
+  }
+
+  it("spec: rejects an oversized declared part before reading or accepting its otherwise valid body", async () => {
+    const mediaId = await startUpload(4096);
+    let reads = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) { reads++; controller.enqueue(new Uint8Array(4096)); controller.close(); },
+    }, { highWaterMark: 0 });
+    // 直接 dispatch し、fetch が Content-Length を書き換えない状態で実認証ルートを通す。
+    const request = new Request(`${BASE}/api/v1/media/uploads/${mediaId}/parts/1`, {
+      method: "PUT", headers: { ...partHeaders(), "content-length": String(NORMAL_PART_BYTES + 1) }, body,
+    });
+    const response = await worker.fetch(request, env as Env, createExecutionContext());
+    expect.soft(response.status).toBe(413);
+    expect.soft(reads).toBe(0);
+    await expectNoPartWritten(mediaId);
+    await body.cancel();
+  });
+
+  it.each([undefined, "1"])(
+    "spec: bounds actual streamed part bytes even when Content-Length is %s",
+    async (declaredLength) => {
+      const mediaId = await startUpload(NORMAL_PART_BYTES);
+      let reads = 0;
+      let cancelled = false;
+      const chunks = [new Uint8Array(NORMAL_PART_BYTES), new Uint8Array(1), new Uint8Array(1024)];
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = chunks[reads++];
+          if (chunk) controller.enqueue(chunk);
+          else controller.close();
+        },
+        cancel() { cancelled = true; },
+      }, { highWaterMark: 0 });
+      const headers = new Headers(partHeaders());
+      if (declaredLength !== undefined) headers.set("content-length", declaredLength);
+      const request = new Request(`${BASE}/api/v1/media/uploads/${mediaId}/parts/1`, {
+        method: "PUT", headers, body,
+      });
+      const response = await worker.fetch(request, env as Env, createExecutionContext());
+      expect.soft(response.status).toBe(413);
+      expect.soft(reads).toBe(2); // 上限超過を検出した時点で停止し、後続を読まない。
+      expect.soft(cancelled).toBe(true);
+      await expectNoPartWritten(mediaId);
+    },
+  );
+
+  it("reserves capacity and rejects a start beyond the object limit", async () => {
     const mediaId = await startUpload(2048);
     expect(mediaId).toBeTruthy();
 
@@ -699,7 +1046,7 @@ describe("media upload", () => {
       "/api/v1/media/uploads",
       {
         clientUploadId: crypto.randomUUID(),
-        cipherBytes: 536_879_105,
+        cipherBytes: MAX_CIPHER_BYTES + 1,
         cryptoFormat: 1,
         chunkBytes: 1_048_592,
       },

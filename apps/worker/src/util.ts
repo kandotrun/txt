@@ -75,12 +75,29 @@ export async function readJson<T = Record<string, unknown>>(
   if (contentLength !== null && Number(contentLength) > maxBytes) {
     throw new ApiError(413, "PAYLOAD_TOO_LARGE", "request body too large");
   }
-  const buffer = await request.arrayBuffer();
-  if (buffer.byteLength > maxBytes) {
-    throw new ApiError(413, "PAYLOAD_TOO_LARGE", "request body too large");
+  // Content-Length is only an early rejection hint. Bound actual stream reads
+  // before buffering, including missing or forged length headers.
+  const bytes = new Uint8Array(maxBytes);
+  let length = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value.byteLength > maxBytes - length) {
+          await reader.cancel().catch(() => undefined);
+          throw new ApiError(413, "PAYLOAD_TOO_LARGE", "request body too large");
+        }
+        bytes.set(value, length);
+        length += value.byteLength;
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
   try {
-    return JSON.parse(new TextDecoder().decode(buffer)) as T;
+    return JSON.parse(new TextDecoder().decode(bytes.subarray(0, length))) as T;
   } catch {
     throw badRequest("body must be valid JSON");
   }

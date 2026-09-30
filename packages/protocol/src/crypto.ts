@@ -17,8 +17,14 @@ export const TAG_BYTES = 16;
 export const CHUNK_PLAIN_BYTES = 1_048_576;
 export const CHUNK_CIPHER_BYTES = CHUNK_PLAIN_BYTES + TAG_BYTES; // 1,048,592
 
-/** Fixed public PRF input, identical across deploys (spec §6.2). */
-export const PRF_INPUT_V1 = await sha256(utf8("txt.2-38.com/prf-input/v1"));
+/** Fixed public PRF input, identical across deploys (spec §6.2).
+ * SHA-256(UTF-8("txt.2-38.com/prf-input/v1")), precomputed to avoid top-level
+ * await: Service Workers prohibit it, including in module scripts.
+ */
+export const PRF_INPUT_V1 = new Uint8Array([
+  181, 165, 73, 138, 248, 253, 71, 164, 221, 124, 159, 172, 110, 62, 182, 133,
+  178, 157, 106, 204, 55, 237, 141, 171, 220, 181, 47, 35, 102, 11, 44, 184,
+]);
 
 export async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
