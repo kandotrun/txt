@@ -2,7 +2,7 @@
 
 `https://txt.2-38.com/` — メールアドレスなしで、パスキーで暗号化された1枚のテキストを読み書きできるアプリ。
 
-仕様は [`spec.md`](./spec.md) が実装基準です（仕様版 1.0）。このリポジトリはそのうち **Web版とサーバー（Worker）** を実装しています。
+仕様は [`spec.md`](./spec.md) が実装基準です（仕様版 1.3、Web-only）。このリポジトリは **Webとサーバー（Worker）のみ** を実装します。デスクトップ・スマートフォンのブラウザーから利用でき、ネイティブアプリの導入は不要です。開発ルールは [`AGENTS.md`](./AGENTS.md) を参照してください。
 
 ## 構成
 
@@ -35,13 +35,14 @@ scripts/        # dev サーバー起動、本番スモーク
 ## セットアップ
 
 ```bash
-npm install
+npm ci
 
 # ローカル開発（ビルド → D1 マイグレーション → wrangler dev）
 npm run dev            # http://localhost:8799
 
 # 検証
-npm run check          # typecheck + protocol/editor テスト + Worker テスト
+npm run check          # typecheck + protocol/editor/Web/security テスト + Worker テスト
+npm run build          # Webをビルド
 npm run test:e2e       # 実ブラウザー E2E（dev サーバーが動いていること）
 
 # 本番
@@ -56,6 +57,7 @@ bash scripts/smoke-prod.sh
 - **先行検証**: 日本語IME（composition 状態機械）、メディア、Undo、PRF/暗号形式、チャンク暗号文の Range 配信
 - **Web基礎**: 登録・復旧・セッション、暗号化本文、共通モデル、CAS、暗号化退避（IndexedDB）
 - **Web完成**: 添付、競合、清掃、セキュリティ、公開設定
+- **ブラウザー対応**: モバイルのレスポンシブUI、Apple端末のWebAuthn/PRF、暗号化メディアService Worker、Apple-touch iconを維持。対応状況はブラウザー・OS・パスキー保存先の組で確認する
 - **オンボーディングと外観（spec §4.1/§4.2/§4.6, 仕様版1.2）**: 「はじめて使う」からの4枚の紹介、登録直後の一度だけの案内、空欄の案内、「活字」基調の外観、広い画面での中央の本文列（最大720px）、編集面を動かさないアニメーションと `prefers-reduced-motion` 対応
 - **シェアと検索（spec §4.6/§14）**: OGP・`summary_large_image` のシェアカード（`npm run brand:images` で画像を生成）、検索掲載の許可と `robots.txt`、「その他」→「txt を紹介する」（アプリのURLだけを共有）
 
@@ -70,8 +72,6 @@ bash scripts/smoke-prod.sh
 
 ## 未実装・未検証（正直な範囲）
 
-- **ネイティブ iOS/macOS（spec §16 フェーズ4）**: `apps/apple/` と `packages/TxtCore/` は未着手。この環境（Linux）には Xcode/Swift がないため、実装も実機検証も行っていません。`spec.md` §13 の Web/Swift 相互運用試験、§4.3/§4.4 の TextKit 編集面、§11.7 の AVAssetResourceLoader は未実施です。
-- **AASA（§13）**: `TxtTeamId` / `TxtIosBundleId` / `TxtMacosBundleId` に実値が入るまで `/.well-known/apple-app-site-association` は 404 を返します（プレースホルダーは公開しない方針）。Team ID / Bundle ID の確認は未完了です。
 - **実IMEでの手動試験（§17.1/§17.2）**: 自動テストは composition イベント順序と状態機械を検証していますが、macOS/Windows/iOS の実IME、フリック入力、ライブ変換は実機で未確認です。
 - **512MiB 動画の実機シーク（§17.5）**: チャンク暗号化と Range 配信は検証済みですが、大容量実ファイルでの実機再生は未実施です。
 - **独立したセキュリティレビュー（§6.3）**: 未実施。暗号コンテナーはアプリ固有の設計であり、監査済み標準形式ではありません。

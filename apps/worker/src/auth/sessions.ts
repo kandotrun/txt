@@ -5,10 +5,9 @@
  * - Normal APIs authorize with an opaque session token (>= 256 bits); D1 keeps
  *   only the SHA-256 hash.
  * - Web uses `__Host-txt_session` (Secure, HttpOnly, SameSite=Strict, Path=/,
- *   no Domain attribute). Native uses a Keychain Bearer token.
+ *   no Domain attribute). Cookie authentication is the only session transport.
  * - Cookie-authenticated writes require an exact Origin and `X-Txt-Request: 1`.
- *   Native requests without Origin go through the verified Bearer path; a
- *   client-supplied `X-Client` header never bypasses CSRF checks.
+ *   A client-supplied `X-Client` header never bypasses CSRF checks.
  */
 
 import type { Env, SessionRow } from "../types.ts";
@@ -41,9 +40,9 @@ export const STEPUP_TTL_MS = SHARED_STEPUP_TTL_MS;
 export interface AuthContext {
   session: SessionRow;
   accountId: string;
-  clientKind: "web" | "native";
+  clientKind: "web";
   scope: "pending" | "active" | "recovery";
-  via: "cookie" | "bearer";
+  via: "cookie";
 }
 
 function parseCookies(header: string | null): Map<string, string> {
@@ -57,16 +56,12 @@ function parseCookies(header: string | null): Map<string, string> {
   return out;
 }
 
-/** Reads the session token, if any, from either the cookie or Bearer header. */
+/** Reads the browser session cookie; Authorization cannot authenticate or override it. */
 export function readSessionToken(
   request: Request,
   env: Env,
-): { token: string; via: "cookie" | "bearer" } | null {
-  const authorization = request.headers.get("authorization");
-  if (authorization && /^Bearer\s+/i.test(authorization)) {
-    const token = authorization.replace(/^Bearer\s+/i, "").trim();
-    if (token.length > 0) return { token, via: "bearer" };
-  }
+): { token: string; via: "cookie" } | null {
+  if (request.headers.has("authorization")) return null;
   const cookies = parseCookies(request.headers.get("cookie"));
   const token = cookies.get(sessionCookieName(env)) ?? cookies.get(SESSION_COOKIE);
   if (token && token.length > 0) return { token, via: "cookie" };
@@ -76,16 +71,9 @@ export function readSessionToken(
 /**
  * Verifies the request origin for cookie-authenticated writes.
  *
- * The Web build always sends `X-Txt-Request: 1`; native sends Bearer without
- * Origin. Requests that present both Cookie and Bearer are rejected.
+ * The Web build always sends `X-Txt-Request: 1` and an allowed Origin.
  */
-export function assertWriteRequestAllowed(request: Request, via: "cookie" | "bearer", env: Env): void {
-  const cookieHeader = request.headers.get("cookie") ?? "";
-  const hasSessionCookie =
-    cookieHeader.includes(SESSION_COOKIE) || cookieHeader.includes("txt_session=");
-  if (hasSessionCookie && via === "bearer") {
-    throw new ApiError(400, "MIXED_AUTH", "cookie and bearer must not be mixed");
-  }
+export function assertWriteRequestAllowed(request: Request, via: "cookie", env: Env): void {
   if (via === "cookie") {
     const origin = request.headers.get("origin");
     // Development serves the app from localhost while APP_ORIGIN may already
@@ -103,14 +91,6 @@ export function assertWriteRequestAllowed(request: Request, via: "cookie" | "bea
     }
     if (request.headers.get("x-txt-request") !== "1") {
       throw new ApiError(403, "CSRF_REQUIRED", "missing request marker");
-    }
-  }
-  if (via === "bearer") {
-    const origin = request.headers.get("origin");
-    // Browser-originated bearer requests are not part of the contract; native
-    // URLSession either omits Origin or sends a non-browser value.
-    if (origin !== null && origin === env.APP_ORIGIN) {
-      throw new ApiError(403, "BEARER_FROM_WEB", "bearer is not accepted from the web origin");
     }
   }
 }
@@ -136,7 +116,7 @@ export async function resolveSession(
   )
     .bind(tokenHash)
     .first<SessionRow & { account_epoch: number; account_status: string }>();
-  if (!row) return null;
+  if (!row || row.client_kind !== "web") return null;
   if (row.revoked_at !== null) return null;
   const now = nowMs();
   if (row.absolute_expires_at <= now || row.idle_expires_at <= now) return null;
@@ -145,7 +125,7 @@ export async function resolveSession(
   return {
     session: row,
     accountId: row.account_id,
-    clientKind: row.client_kind === "native" ? "native" : "web",
+    clientKind: "web",
     scope: row.scope,
     via: found.via,
   };
@@ -190,7 +170,7 @@ export async function issueSession(
   env: Env,
   options: {
     accountId: string;
-    clientKind: "web" | "native";
+    clientKind: "web";
     scope: "pending" | "active" | "recovery";
     authEpoch: number;
     sid?: string;

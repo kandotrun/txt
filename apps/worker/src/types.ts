@@ -12,12 +12,9 @@ export interface Env {
   REGISTRATION_MODE: string;
   ACCOUNT_LIMIT_BYTES: string;
   MEDIA_GRACE_MS: string;
-  TxtTeamId?: string;
-  TxtIosBundleId?: string;
-  TxtMacosBundleId?: string;
 }
 
-export type ClientKind = "web" | "native";
+export type ClientKind = "web";
 
 export interface SessionRow {
   token_hash32: ArrayBuffer;

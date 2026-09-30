@@ -96,7 +96,7 @@ export async function storeChallenge(
     challenge: string;
     accountId?: string | null;
     credentialId?: string | null;
-    clientKind: "web" | "native";
+    clientKind: "web";
     binding: ArrayBuffer;
     context?: ChallengeContext;
   },
@@ -157,7 +157,7 @@ export async function consumeChallenge(
   )
     .bind(challengeHash.buffer as ArrayBuffer, options.purpose)
     .first<ChallengeRow>();
-  if (!row) throw badRequest("unknown or already consumed challenge");
+  if (!row || row.client_kind !== "web") throw badRequest("unknown or already consumed challenge");
   if (row.consumed_at !== null) throw conflict("challenge already used");
   if (row.expires_at <= now) throw badRequest("challenge expired");
   if (!arrayBufferEqual(row.binding_hash32, options.binding)) {

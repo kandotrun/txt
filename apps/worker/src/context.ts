@@ -15,20 +15,10 @@ export interface AppBindings {
   Variables: {
     auth: AuthContext | null;
     requestId: string;
-    clientKind: "web" | "native";
   };
 }
 
 export type AppContext = Context<AppBindings>;
-
-/** Web is decided by the exact Origin; `X-Client` never bypasses checks. */
-export function clientKindFor(c: AppContext): "web" | "native" {
-  const origin = c.req.header("origin");
-  if (origin === c.env.APP_ORIGIN) return "web";
-  const userAgent = c.req.header("user-agent") ?? "";
-  if (/txt-ios|txt-macos/i.test(userAgent)) return "native";
-  return "web";
-}
 
 export async function getAuth(c: AppContext): Promise<AuthContext | null> {
   if (c.get("auth")) return c.get("auth");
@@ -66,8 +56,4 @@ export async function enforceRateLimit(
   if ((updated?.count ?? 0) > options.limit) {
     throw tooManyRequests("too many requests");
   }
-}
-
-export function readClientKindHint(body: Record<string, unknown>): "web" | "native" {
-  return body.clientKind === "native" ? "native" : "web";
 }

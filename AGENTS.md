@@ -2,7 +2,7 @@
 
 ## 適用範囲
 
-`spec.md` が実装基準（仕様版 1.0）。本書はその実装リポジトリ全体に適用する。
+`spec.md` が実装基準（仕様版 1.3、Web-only）。本書はその実装リポジトリ全体に適用する。提供・開発対象はWebとWorkerのみ。デスクトップ・スマートフォンのブラウザー対応を維持し、ネイティブアプリを追加しない。
 
 ## 非交渉ルール
 
@@ -16,12 +16,15 @@
 ## 実装方針
 
 - 依存は固定する。ProseMirror 等を更新するときは IME / 選択 / Undo の回帰試験を行う。
-- 暗号契約（`packages/protocol`）は Web と将来の Swift 実装が共有する。バイト列を変える変更は
+- 暗号契約（`packages/protocol`）は Web の暗号・文書・退避に使う。バイト列を変える変更は
   テストベクトルと `spec.md` §6.3 を同時に更新する。
 - サーバーは平文を検証できない前提で書く。クライアント側の検証と件数制限を信用しない。
 - D1 の 0 行 UPDATE は例外ではない。CAS 後の文は「CAS が成功した」ことを SQL でガードする。
 - R2 と D1 の分散トランザクションを仮定しない。復旧経路（実体サイズ照合など）を必ず書く。
-- 構造の正規化は IME 安全点でのみ行う。入力中に DOM や textStorage を触らない。
+- 構造の正規化は IME 安全点でのみ行う。入力中にエンジン管理 DOM を触らない。
+
+- Apple-touch icon、OGP、Web Share、Apple端末のWebAuthn/PRF、レスポンシブUI、暗号化メディアService WorkerはWebの機能。削除対象のアプリ実装と混同しない。
+- セッションはCookieのみ。AuthorizationやUser-AgentでOrigin/CSRF/RP検証を緩和しない。
 
 ## 検証
 
@@ -48,8 +51,6 @@ bash scripts/smoke-prod.sh   # 本番スモーク（txt.2-38.com）
 - `_headers` ファイルが静的アセットのセキュリティヘッダとキャッシュ方針を持つ。HTML を no-store に
   保たないと Cloudflare のキャッシュが古いシェルを配る。
 
-## 未実装（意図的な範囲外）
+## 未検証
 
-- ネイティブ iOS/macOS（`spec.md` §16 フェーズ4）: `apps/apple/` と `packages/TxtCore/` は未着手。
-- AASA の実値（Team ID / Bundle ID）確定と `.well-known` の公開。
 - 実IME（macOS/Windows/iOS）での手動試験、512MiB 動画の実機シーク、独立したセキュリティレビュー。
