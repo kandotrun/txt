@@ -18,6 +18,14 @@
   Cache-Control: no-cache
   Service-Worker-Allowed: /
 
+# Share card and crawler files: stable names, so cache for a bounded time.
+/og.png
+  Cache-Control: public, max-age=86400
+/apple-touch-icon.png
+  Cache-Control: public, max-age=86400
+/robots.txt
+  Cache-Control: public, max-age=3600
+
 # Hashed bundles are immutable.
 /assets/*
   Cache-Control: public, max-age=31536000, immutable

@@ -4,10 +4,36 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="light dark" />
-    <meta name="robots" content="noindex, nofollow" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0b0b0c" media="(prefers-color-scheme: dark)" />
+    <!-- The title stays fixed (spec §4.2); share wording lives in og:title. -->
     <title>txt</title>
+    <meta
+      name="description"
+      content="メールアドレスなしで、パスキーだけで使える、あなた専用の1枚のテキスト。本文と添付は端末で暗号化され、サーバーには暗号文だけが保存されます。"
+    />
+    <link rel="canonical" href="https://txt.2-38.com/" />
+
+    <!-- Share card (spec §14). Absolute URLs: crawlers resolve nothing else. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="txt" />
+    <meta property="og:locale" content="ja_JP" />
+    <meta property="og:url" content="https://txt.2-38.com/" />
+    <meta property="og:title" content="txt — メールアドレスなしで、1枚のテキストを。" />
+    <meta
+      property="og:description"
+      content="パスキーだけで使える、あなた専用の1枚。本文と添付は端末で暗号化され、サーバーには暗号文だけが届きます。"
+    />
+    <meta property="og:image" content="https://txt.2-38.com/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="txt. — メールアドレスなしで、1枚のテキストを。" />
+    <meta name="twitter:card" content="summary_large_image" />
+
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
