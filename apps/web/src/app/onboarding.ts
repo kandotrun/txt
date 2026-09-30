@@ -150,7 +150,8 @@ export function runIntro(mode: IntroMode, options: { behind: HTMLElement[] }): P
 
 /** Builds the typographic illustration for one slide; CSS runs its animation. */
 function buildArt(id: IntroSlideId, alive: () => boolean): HTMLElement {
-  const art = element("div", `art art-${id}`);
+  // `art--<id>` (a modifier) must not collide with part classes like `.art-sheet`.
+  const art = element("div", `art art--${id}`);
   switch (id) {
     case "sheet": {
       const sheet = element("div", "art-sheet");

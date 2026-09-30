@@ -584,6 +584,13 @@ body {
   user-select: none;
 }
 
+/* `flex: none`: the parts must never shrink (an empty caret would collapse). */
+.wordmark-text,
+.wordmark-dot,
+.wordmark-caret {
+  flex: none;
+}
+
 .wordmark-text {
   display: inline-block;
   animation: type-in 480ms steps(3, jump-end) 150ms both;
@@ -603,6 +610,17 @@ body {
   margin-left: 0.04em;
   background: var(--fg);
   animation: caret-blink 1.06s steps(1) infinite;
+}
+
+/* Break Japanese headings between phrases, not mid-word (outside the editor). */
+.gate-title,
+.gate-body,
+.intro-title,
+.intro-body,
+.dialog-title,
+.recovery-lead,
+.recovery-note {
+  word-break: auto-phrase;
 }
 
 .gate-title {
