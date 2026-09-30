@@ -2,7 +2,8 @@
  * One-time hints after registration (spec §4.1, §4.6 「新規作成」).
  *
  * The hints are non-modal and never take focus: the editor keeps the caret,
- * and a key press, the start of an IME composition, a tap outside the hints,
+ * and a key press, any text input (voice input and some software keyboards
+ * send no keydown), the start of an IME composition, a tap outside the hints,
  * or 「わかった」 dismisses them. Listeners observe in the capture phase and
  * never cancel an event, so IME and ProseMirror handling are untouched
  * (spec §4.5, §9).
@@ -41,6 +42,7 @@ export function showCoachMarks(layer: HTMLElement, hints: CoachHint[]): () => vo
     if (dismissed) return;
     dismissed = true;
     document.removeEventListener("keydown", dismiss, true);
+    document.removeEventListener("beforeinput", dismiss, true);
     document.removeEventListener("compositionstart", dismiss, true);
     document.removeEventListener("pointerdown", onPointerDown, true);
     void playExit(layer, "is-leaving");
@@ -51,6 +53,7 @@ export function showCoachMarks(layer: HTMLElement, hints: CoachHint[]): () => vo
 
   ok.addEventListener("click", dismiss);
   document.addEventListener("keydown", dismiss, true);
+  document.addEventListener("beforeinput", dismiss, true);
   document.addEventListener("compositionstart", dismiss, true);
   document.addEventListener("pointerdown", onPointerDown, true);
   return dismiss;

@@ -2,7 +2,8 @@
  * Application entrypoint (spec §3, §4, §9, §10, §11).
  *
  * Responsibilities: gate screens, passkey registration/unlock, editor wiring,
- * sync engine, media rendering, lock policy, and the "その他" menu.
+ * sync engine, media rendering, lock policy, the "その他" menu, and wiring the
+ * onboarding layers (intro, one-time hints, empty-state hint).
  */
 
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
@@ -17,9 +18,14 @@ import {
   loadKeptVaultKey,
   keepVaultKey,
 } from "./device-keep.ts";
-import { Editor } from "./editor.ts";
+import { showCoachMarks } from "./coach.ts";
+import { Editor, isEmptyDoc } from "./editor.ts";
+import { icon } from "./icons.ts";
+import type { IconName } from "./icons.ts";
 import { BLOB_FALLBACK_MAX_BYTES, classify, fetchDecrypted, uploadFile } from "./media.ts";
 import type { MediaRejectedError } from "./media.ts";
+import { cancelExit, playExit, replayEnter } from "./motion.ts";
+import { runIntro } from "./onboarding.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
 import type { SyncState } from "./sync.ts";
 import {
@@ -54,7 +60,10 @@ const elements = {
   fileInput: must<HTMLInputElement>("file-input"),
   syncStatus: must<HTMLElement>("sync-status"),
   attachProgress: must<HTMLElement>("attach-progress"),
+  emptyHint: must<HTMLElement>("empty-hint"),
+  coach: must<HTMLElement>("coach"),
   dialog: must<HTMLDialogElement>("dialog"),
+  dialogClose: must<HTMLButtonElement>("dialog-close"),
   dialogTitle: must<HTMLElement>("dialog-title"),
   dialogBody: must<HTMLElement>("dialog-body"),
   dialogActions: must<HTMLElement>("dialog-actions"),
@@ -112,7 +121,20 @@ const state: AppState = {
 /* Gate rendering (spec §4.6)                                          */
 /* ------------------------------------------------------------------ */
 
-type GateAction = { label: string; primary?: boolean; onClick: () => void | Promise<void> };
+/** Visual weight of a button: primary by default (§4.2 活字). */
+interface ButtonTone {
+  primary?: boolean;
+  /** `ghost` for a quiet alternative, `danger` for an irreversible action. */
+  tone?: "ghost" | "danger";
+}
+
+function buttonClass(action: ButtonTone): string {
+  if (action.tone === "danger") return "button danger";
+  if (action.tone === "ghost") return "button ghost";
+  return action.primary === false ? "button secondary" : "button";
+}
+
+type GateAction = ButtonTone & { label: string; onClick: () => void | Promise<void> };
 
 function showGate(options: {
   title?: string;
@@ -122,6 +144,9 @@ function showGate(options: {
   error?: boolean;
   showRecovery?: boolean;
 }): void {
+  // The gate may still be fading out from the last unlock: bring it back.
+  cancelExit(elements.gate);
+  elements.gate.inert = false;
   elements.gate.hidden = false;
   elements.app.hidden = true;
   elements.gateTitle.textContent = options.title ?? "メールアドレスなしで、1枚のテキストを。";
@@ -132,7 +157,7 @@ function showGate(options: {
     ...options.actions.map((action) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = action.primary === false ? "button secondary" : "button";
+      button.className = buttonClass(action);
       button.textContent = action.label;
       button.addEventListener("click", () => {
         void action.onClick();
@@ -145,10 +170,35 @@ function showGate(options: {
   elements.gateDetails.hidden = !options.showRecovery;
 }
 
+/**
+ * Shows the editor. The editor appears at once *underneath* the gate, which
+ * then fades out on top of it: the editing surface is never animated (§4.2).
+ */
 function showApp(): void {
-  elements.gate.hidden = true;
   elements.app.hidden = false;
   elements.controls.hidden = false;
+  updateEmptyHint();
+  if (!elements.gate.hidden) {
+    elements.gate.inert = true;
+    void playExit(elements.gate, "is-leaving");
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Onboarding hints (spec §4.1, §4.6)                                   */
+/* ------------------------------------------------------------------ */
+
+let dismissCoach: (() => void) | null = null;
+
+/**
+ * Shows 「ここから書く」 only while the document is empty. The hint is a sibling
+ * of the editor host, and it is re-evaluated only at IME safe points; while a
+ * composition is in progress it stays hidden so it never overlaps marked text.
+ */
+function updateEmptyHint(): void {
+  const editor = state.editor;
+  elements.emptyHint.hidden =
+    !editor || !editor.isSafePoint() || !isEmptyDoc(editor.state.doc);
 }
 
 /* ------------------------------------------------------------------ */
@@ -158,18 +208,23 @@ function showApp(): void {
 let toastTimer: number | null = null;
 
 function toast(message: string, duration = 2600): void {
+  cancelExit(elements.toast);
   elements.toast.textContent = message;
   elements.toast.hidden = false;
+  replayEnter(elements.toast, "is-entering");
   if (toastTimer !== null) window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => {
-    elements.toast.hidden = true;
+    void playExit(elements.toast, "is-leaving");
   }, duration);
 }
 
-interface DialogAction {
+interface DialogAction extends ButtonTone {
   label: string;
-  primary?: boolean;
   value: string;
+  /** Menu rows only: leading icon. */
+  icon?: IconName;
+  /** Menu rows only: draw a divider above this row. */
+  separatorBefore?: boolean;
 }
 
 /**
@@ -183,6 +238,8 @@ function showDialog(options: {
   title: string;
   body: HTMLElement | string;
   actions: DialogAction[];
+  /** `menu`: a list of rows with a close button (「その他」, §4.6). */
+  variant?: "menu";
 }): Promise<string> {
   return new Promise((resolve) => {
     let settled = false;
@@ -212,18 +269,29 @@ function showDialog(options: {
       settle(value);
     };
 
+    const isMenu = options.variant === "menu";
+    dialog.classList.toggle("dialog--menu", isMenu);
     elements.dialogTitle.textContent = options.title;
     elements.dialogBody.replaceChildren(
       typeof options.body === "string" ? textParagraph(options.body) : options.body,
     );
+    // Assigning (not adding) the handler binds the close button to this
+    // dialog's answer only.
+    elements.dialogClose.hidden = !isMenu;
+    elements.dialogClose.onclick = () => {
+      settle("dismissed");
+      if (dialog.open) dialog.close();
+    };
     // Rebuilding the buttons each time prevents stale listeners from resolving
     // a later dialog with an earlier answer.
     elements.dialogActions.replaceChildren(
-      ...options.actions.map((action) => {
-        const button = document.createElement("button");
+      ...options.actions.flatMap((action) => {
+        const button = isMenu ? menuItem(action) : document.createElement("button");
         button.type = "button";
-        button.className = action.primary === false ? "button secondary" : "button";
-        button.textContent = action.label;
+        if (!isMenu) {
+          button.className = buttonClass(action);
+          button.textContent = action.label;
+        }
         button.dataset.value = action.value;
         button.addEventListener("click", () => {
           // Resolve directly on the click: relying solely on the <dialog>
@@ -231,7 +299,11 @@ function showDialog(options: {
           settle(action.value);
           if (dialog.open) dialog.close();
         });
-        return button;
+        if (!isMenu || !action.separatorBefore) return [button];
+        const separator = document.createElement("div");
+        separator.className = "menu-separator";
+        separator.setAttribute("role", "separator");
+        return [separator, button];
       }),
     );
     dialog.addEventListener("close", onClose);
@@ -243,11 +315,46 @@ function showDialog(options: {
   });
 }
 
-function textParagraph(text: string): HTMLElement {
+function textParagraph(text: string, className?: string): HTMLElement {
   const paragraph = document.createElement("p");
   paragraph.textContent = text;
   paragraph.style.margin = "0";
+  if (className) paragraph.className = className;
   return paragraph;
+}
+
+/** A 「その他」 row: icon + label; irreversible rows use the danger tone. */
+function menuItem(action: DialogAction): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = action.tone === "danger" ? "menu-item danger" : "menu-item";
+  if (action.icon) button.append(icon(action.icon));
+  const label = document.createElement("span");
+  label.textContent = action.label;
+  button.append(label);
+  return button;
+}
+
+/** Swaps a tool button's icon and label (e.g. コピー → コピーしました). */
+function setToolButton(button: HTMLButtonElement, label: string, name: IconName): void {
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.replaceChildren(icon(name), text);
+}
+
+/**
+ * Saves `text` as a file through a Blob URL. The anchor lives inside `host`
+ * (the open dialog) because everything outside a modal dialog is inert.
+ */
+function downloadText(filename: string, text: string, host: HTMLElement): void {
+  const url = URL.createObjectURL(new Blob([`${text}\n`], { type: "text/plain" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  host.append(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* ------------------------------------------------------------------ */
@@ -521,15 +628,21 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       {
         onCommittedChange: () => {
           if (state.editor?.isComposing) {
+            elements.emptyHint.hidden = true;
             state.sync?.noteComposingChange();
             return;
           }
+          updateEmptyHint();
           state.sync?.noteCommittedChange();
         },
         onCompositionState: (compositionState) => {
           if (compositionState === "idle") {
             // Committed input after composition: resume the normal schedule.
+            updateEmptyHint();
             state.sync?.noteCommittedChange();
+          } else {
+            // Never let the hint overlap marked text (spec §4.1, §9).
+            elements.emptyHint.hidden = true;
           }
         },
         onFilesDropped: (files, position) => {
@@ -566,6 +679,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         } else {
           state.editor?.applyRemoteDocument(remote);
         }
+        updateEmptyHint();
         syncServiceWorkerMedia();
         // A remote copy that carried unreferenced media entries was opened with
         // them dropped; persist the repaired model so the stored document stops
@@ -658,6 +772,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
           // resolves node metadata through `state.document` (spec §10.6).
           state.document = recovered;
           editor.applyRemoteDocument(recovered);
+          updateEmptyHint();
           // Save from the base the draft was written against: if the server has
           // moved past it, the save fails closed with 412 and the conflict
           // dialog decides — never a silent overwrite (spec §10.4).
@@ -747,6 +862,7 @@ function lockVault(reason: string): void {
     return;
   }
   if (state.editor && !state.editor.isSafePoint()) return;
+  dismissCoach?.();
   state.sessionGeneration += 1;
   state.sync?.stop();
   state.sync = null;
@@ -851,10 +967,27 @@ async function registerFlow(): Promise<void> {
       credentialId: "",
       keyVersion: 1,
     });
-    toast("準備ができました。");
+    // First edit: point at the two permanent controls once (spec §4.6 新規作成).
+    dismissCoach = showCoachMarks(elements.coach, [
+      { side: "start", text: "写真・動画・音声を本文に入れる" },
+      { side: "end", text: "ロック・パスキー・復旧キー・使い方" },
+    ]);
   } catch (error) {
     reportAuthError(error);
   }
+}
+
+/**
+ * 「はじめて使う」 from a fresh gate: explain the sheet, passkeys, encryption and
+ * the recovery key first, and create the passkey only when asked (§4.6 紹介).
+ */
+async function startRegistration(): Promise<void> {
+  const outcome = await runIntro("register", { behind: [elements.gate] });
+  if (outcome === "create") {
+    await registerFlow();
+    return;
+  }
+  elements.gateActions.querySelector<HTMLButtonElement>("button")?.focus();
 }
 
 function reportAuthError(error: unknown): void {
@@ -874,27 +1007,61 @@ function reportAuthError(error: unknown): void {
   });
 }
 
+/**
+ * Shows the recovery key and asks the user to keep it (spec §5.3, §7.1).
+ * Copying and saving to a file are explicit actions; 「保存しました」 only
+ * confirms and has no clipboard side effect.
+ */
 async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
-  const pre = document.createElement("pre");
-  pre.textContent = recoveryKeyText;
-  const note = document.createElement("p");
-  note.textContent = RECOVERY_HELP;
-  note.style.margin = "0";
   const body = document.createElement("div");
-  body.append(note, pre);
+  const key = document.createElement("pre");
+  key.className = "recovery-key";
+  key.textContent = recoveryKeyText;
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "button secondary compact";
+  setToolButton(copy, "コピー", "copy");
+  copy.addEventListener("click", () => {
+    void navigator.clipboard
+      .writeText(recoveryKeyText)
+      .then(() => setToolButton(copy, "コピーしました", "check"))
+      .catch(() => {
+        // Clipboard unavailable: select the key so it can be copied by hand.
+        window.getSelection()?.selectAllChildren(key);
+        setToolButton(copy, "選択しました", "check");
+      })
+      .finally(() => {
+        window.setTimeout(() => setToolButton(copy, "コピー", "copy"), 2400);
+      });
+  });
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "button secondary compact";
+  setToolButton(save, "ファイルに保存", "download");
+  save.addEventListener("click", () => {
+    downloadText("txt-recovery-key.txt", recoveryKeyText, body);
+  });
+
+  const tools = document.createElement("div");
+  tools.className = "recovery-tools";
+  tools.append(copy, save);
+  body.append(
+    textParagraph("パスキーを失くしたときに、この1枚を開ける唯一の鍵です。", "recovery-lead"),
+    key,
+    tools,
+    textParagraph(RECOVERY_HELP, "recovery-note"),
+  );
   const decision = await showDialog({
     title: "復旧キーを保存してください",
     body,
     actions: [
-      { label: "コピーしました", value: "confirm", primary: true },
-      { label: "あとで", value: "later", primary: false },
+      { label: "保存しました", value: "confirm", primary: true },
+      { label: "あとで", value: "later", tone: "ghost" },
     ],
   });
-  if (decision === "confirm") {
-    await navigator.clipboard.writeText(recoveryKeyText).catch(() => undefined);
-    return true;
-  }
-  return false;
+  return decision === "confirm";
 }
 
 async function recoveryFlow(): Promise<void> {
@@ -946,17 +1113,25 @@ async function showMoreMenu(): Promise<void> {
     body: kept
       ? `この端末ではパスキーなしで開けます（${new Date(kept.expiresAt).toLocaleDateString("ja-JP")} まで）。`
       : "この1枚に関する操作です。",
+    variant: "menu",
     actions: [
-      { label: keepLabel, value: kept ? "forget-device" : "keep-device", primary: true },
-      { label: "パスキーを追加", value: "add-passkey" },
-      { label: "復旧キーを更新", value: "rotate-recovery" },
-      { label: "今すぐロック", value: "lock-now" },
-      { label: "セッションを終了", value: "end-session" },
-      { label: "アカウントを削除", value: "delete-account" },
+      { label: keepLabel, value: kept ? "forget-device" : "keep-device", icon: "device" },
+      { label: "今すぐロック", value: "lock-now", icon: "lock" },
+      { label: "パスキーを追加", value: "add-passkey", icon: "key" },
+      { label: "復旧キーを更新", value: "rotate-recovery", icon: "refresh" },
+      { label: "使い方", value: "help", icon: "help" },
+      // Session and account actions sit apart; deletion is marked by tone and
+      // icon, not by colour alone (spec §4.1, §4.6).
+      { label: "セッションを終了", value: "end-session", icon: "logout", separatorBefore: true },
+      { label: "アカウントを削除", value: "delete-account", icon: "trash", tone: "danger" },
     ],
   });
   if (!state.unlocked) return;
   switch (decision) {
+    case "help":
+      await runIntro("replay", { behind: [elements.app] });
+      state.editor?.focus();
+      break;
     case "keep-device": {
       if (!state.documentId) break;
       try {
@@ -1025,7 +1200,7 @@ async function showMoreMenu(): Promise<void> {
         title: "アカウントを削除しますか",
         body: "本文・添付・鍵が削除され、元に戻せません。",
         actions: [
-          { label: "削除する", value: "confirm", primary: true },
+          { label: "削除する", value: "confirm", tone: "danger" },
           { label: "やめる", value: "cancel", primary: false },
         ],
       });
@@ -1149,16 +1324,17 @@ async function boot(): Promise<void> {
       body: "暗号化された内容を開くため、パスキーを確認します。",
       actions: [
         { label: "パスキーで開く", onClick: () => void unlockFlow() },
-        { label: "はじめて使う", primary: false, onClick: () => void registerFlow() },
+        { label: "はじめて使う", primary: false, onClick: () => void startRegistration() },
       ],
       showRecovery: true,
     });
   } catch (error) {
     if (error instanceof ApiRequestError && error.status === 401) {
+      // First visit (or a new browser): lead with the intro (§4.6 紹介).
       showGate({
         actions: [
-          { label: "パスキーで開く", onClick: () => void loginFlow() },
-          { label: "はじめて使う", primary: false, onClick: () => void registerFlow() },
+          { label: "はじめて使う", onClick: () => void startRegistration() },
+          { label: "パスキーで開く", primary: false, onClick: () => void loginFlow() },
         ],
         showRecovery: true,
       });
