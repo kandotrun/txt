@@ -1,9 +1,9 @@
 /* txt.2-38.com — spec §4.2
  *
  * "活字" (type): white page, ink-black type, one accent colour. The editing
- * surface uses the screen width directly — no card, no paper shadow, no fake
- * Apple window chrome. Body text uses a system monospace stack with a Japanese
- * fallback, base 16 CSS px, line-height 1.6.
+ * surface is a centred column of readable measure on the bare page — no card,
+ * no paper shadow, no fake Apple window chrome. Body text uses a system
+ * monospace stack with a Japanese fallback, base 16 CSS px, line-height 1.6.
  *
  * Motion rule (spec §4.2): animations live only on layers outside the editing
  * surface (gate, intro, dialog, toast, hints). Nothing inside or wrapping
@@ -25,6 +25,12 @@
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spring: cubic-bezier(0.2, 1.45, 0.4, 1);
   --pad-inline: 16px;
+  /* Readable line length on wide screens (§4.2): the text column is centred
+     and never wider than this; the side gutters grow instead. */
+  --measure: 720px;
+  /* Inline inset of the text column. `%` resolves at the use site, i.e.
+     against the page width for the editor and the fixed layers alike. */
+  --column-inline: max(var(--pad-inline), calc((100% - var(--measure)) / 2));
   --footer-height: 56px;
 }
 
@@ -231,7 +237,7 @@ body {
 
 .editor {
   flex: 1;
-  padding: 24px var(--pad-inline) 0;
+  padding: 24px var(--column-inline) 0;
   /* Trailing space so the last line is never hidden behind the footer or the
      software keyboard (spec §4.2). */
   padding-bottom: calc(var(--footer-height) + env(safe-area-inset-bottom, 0px) + 40vh);
@@ -290,8 +296,8 @@ body {
 .empty-hint {
   position: absolute;
   top: 24px;
-  left: var(--pad-inline);
-  right: var(--pad-inline);
+  left: var(--column-inline);
+  right: var(--column-inline);
   margin: 0;
   color: var(--muted);
   pointer-events: none;
@@ -311,7 +317,8 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 6px calc(var(--pad-inline) - 10px);
+  /* The 44px buttons line up with the edges of the text column. */
+  padding: 6px calc(var(--column-inline) - 10px);
   padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: saturate(1.4) blur(14px);
@@ -383,8 +390,8 @@ body {
 
 .attach-progress {
   position: fixed;
-  left: var(--pad-inline);
-  right: var(--pad-inline);
+  left: var(--column-inline);
+  right: var(--column-inline);
   bottom: calc(var(--footer-height) + env(safe-area-inset-bottom, 0px) + 8px);
   z-index: 6;
   display: flex;
@@ -463,12 +470,12 @@ body {
 
 /* Arrows point at the centre of the 44px controls below. */
 .coach-bubble.start {
-  left: var(--pad-inline);
+  left: var(--column-inline);
   transform-origin: 12px 100%;
 }
 
 .coach-bubble.end {
-  right: var(--pad-inline);
+  right: var(--column-inline);
   transform-origin: calc(100% - 12px) 100%;
   animation-delay: 380ms;
 }
@@ -1047,6 +1054,13 @@ body {
   font-size: 14px;
   line-height: 1.7;
   color: var(--fg);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Composite dialog bodies (recovery key, conflict) stack their parts. */
+.dialog-body > div {
   display: flex;
   flex-direction: column;
   gap: 12px;
