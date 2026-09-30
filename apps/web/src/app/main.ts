@@ -26,6 +26,7 @@ import { BLOB_FALLBACK_MAX_BYTES, classify, fetchDecrypted, uploadFile } from ".
 import type { MediaRejectedError } from "./media.ts";
 import { cancelExit, playExit, replayEnter } from "./motion.ts";
 import { runIntro } from "./onboarding.ts";
+import { shareApp } from "./share.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
 import type { SyncState } from "./sync.ts";
 import {
@@ -1120,6 +1121,8 @@ async function showMoreMenu(): Promise<void> {
       { label: "パスキーを追加", value: "add-passkey", icon: "key" },
       { label: "復旧キーを更新", value: "rotate-recovery", icon: "refresh" },
       { label: "使い方", value: "help", icon: "help" },
+      // Shares the app's URL only — never the sheet (spec §4.6).
+      { label: "txt を紹介する", value: "share", icon: "share" },
       // Session and account actions sit apart; deletion is marked by tone and
       // icon, not by colour alone (spec §4.1, §4.6).
       { label: "セッションを終了", value: "end-session", icon: "logout", separatorBefore: true },
@@ -1131,6 +1134,14 @@ async function showMoreMenu(): Promise<void> {
     case "help":
       await runIntro("replay", { behind: [elements.app] });
       state.editor?.focus();
+      break;
+    case "share":
+      try {
+        const outcome = await shareApp({ navigator, origin: window.location.origin });
+        if (outcome === "copied") toast("リンクをコピーしました。");
+      } catch {
+        toast("共有できませんでした。アドレスバーのURLを共有してください。");
+      }
       break;
     case "keep-device": {
       if (!state.documentId) break;
