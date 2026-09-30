@@ -55,7 +55,17 @@ const appOutput = path.basename(appEntry);
 
 await fs.copyFile(path.join(dist, "assets", swOutput), path.join(dist, "sw.js"));
 
-for (const name of ["index.html", "styles.css", "manifest.webmanifest", "icon.svg", "_headers"]) {
+for (const name of [
+  "index.html",
+  "styles.css",
+  "manifest.webmanifest",
+  "icon.svg",
+  "_headers",
+  // Share card and crawler files (spec §14).
+  "og.png",
+  "apple-touch-icon.png",
+  "robots.txt",
+]) {
   await fs.copyFile(path.join(root, "static", name), path.join(dist, name));
 }
 

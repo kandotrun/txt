@@ -1,0 +1,6 @@
+# txt.2-38.com — spec §14: the public shell may be indexed; the API and the
+# Service Worker's local media paths are not pages.
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /_local/
