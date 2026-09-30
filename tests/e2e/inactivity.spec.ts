@@ -2,6 +2,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installVirtualAuthenticator } from "./helpers/authenticator.ts";
+import { registerViaOnboarding } from "./helpers/onboarding.ts";
 
 // 実アカウントを使わず、ローカル Worker にテスト専用アカウントを作る。
 async function openSheet(page: Page): Promise<void> {
@@ -9,9 +10,7 @@ async function openSheet(page: Page): Promise<void> {
   // 起動時に予約されるタイマーも対象にする。長い放置は待たずに再現する。
   await page.clock.install();
   await page.goto("/");
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 }
 
