@@ -83,6 +83,15 @@ export const schema = new Schema({
   marks: {},
 });
 
+/**
+ * True when the document is a single empty text block: no text, no media.
+ * Drives the empty-state hint, which lives outside the editing DOM (§4.1).
+ */
+export function isEmptyDoc(doc: PMNode): boolean {
+  const only = doc.childCount === 1 ? doc.firstChild : null;
+  return only !== null && only.type.name === "paragraph" && only.content.size === 0;
+}
+
 export type CompositionState = "idle" | "composing" | "settling";
 
 export interface EditorCallbacks {

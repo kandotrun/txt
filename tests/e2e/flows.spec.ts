@@ -10,6 +10,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installVirtualAuthenticator, listCredentials } from "./helpers/authenticator.ts";
+import { registerViaOnboarding } from "./helpers/onboarding.ts";
 
 const BASE = process.env.TXT_BASE_URL ?? "http://localhost:8799";
 
@@ -65,13 +66,10 @@ test("registers with a passkey, edits, and syncs", async ({ page }) => {
 
   await page.goto(BASE);
   await expect(page.getByRole("button", { name: "はじめて使う" })).toBeVisible();
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-
-  // The recovery key dialog must appear before the editor is usable.
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  const recoveryKey = (await page.locator("dialog pre").textContent()) ?? "";
+  // Registration goes through the intro, and the recovery key must be shown
+  // and confirmed before the editor is usable.
+  const recoveryKey = await registerViaOnboarding(page);
   expect(recoveryKey).toMatch(/^TXT1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
-  await page.getByRole("button", { name: "コピーしました" }).click();
 
   // The editor is now available and the virtual authenticator holds 1 credential.
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
@@ -110,9 +108,7 @@ test("registers with a passkey, edits, and syncs", async ({ page }) => {
 test("keeps the vault on this device so a return visit needs no passkey", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 
@@ -188,9 +184,7 @@ test("keeps the vault on this device so a return visit needs no passkey", async 
 test("preserves IME composition without syncing it mid-composition", async ({ page }) => {
   const { client, authenticatorId } = await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   void client;
   void authenticatorId;
@@ -257,9 +251,7 @@ test("preserves IME composition without syncing it mid-composition", async ({ pa
 test("uploads an image and serves it through the encrypted range path", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 
@@ -333,9 +325,7 @@ test("uploads an image and serves it through the encrypted range path", async ({
 test("inserts a file at the caret instead of the top of the document", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 
@@ -401,9 +391,7 @@ test("inserts a file at the caret instead of the top of the document", async ({ 
 test("repairs a stored document that carries an unreferenced media entry", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 
@@ -587,9 +575,7 @@ test("repairs a stored document that carries an unreferenced media entry", async
 test("refreshes to the latest revision saved by another session", async ({ page, browser }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
 
@@ -618,9 +604,7 @@ test("refreshes to the latest revision saved by another session", async ({ page,
 test("rejects unsafe media types and oversized files in the UI", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#editor-host .ProseMirror")).toBeVisible({ timeout: 30000 });
   // Let the "準備ができました" toast expire so the rejection message is the one
@@ -655,9 +639,7 @@ test("rejects unsafe media types and oversized files in the UI", async ({ page }
 test("deletes the account and clears local state", async ({ page }) => {
   await installVirtualAuthenticator(page, { hasPrf: true });
   await page.goto(BASE);
-  await page.getByRole("button", { name: "はじめて使う" }).click();
-  await expect(page.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
-  await page.getByRole("button", { name: "コピーしました" }).click();
+  await registerViaOnboarding(page);
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
 
   await page.locator("#editor-host .ProseMirror").click();

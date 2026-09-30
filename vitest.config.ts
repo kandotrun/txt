@@ -7,6 +7,7 @@ export default defineConfig({
       "tests/editor/**/*.test.ts",
       "tests/sync/**/*.test.ts",
       "tests/security/**/*.test.ts",
+      "tests/web/**/*.test.ts",
     ],
     environment: "node",
     globals: true,
