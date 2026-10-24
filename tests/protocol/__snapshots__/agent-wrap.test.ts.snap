@@ -1,0 +1,9 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`agent wrap known-answer vectors > KEK is reproducible from a fixed shared secret and salt 1`] = `"6c5640ddfe082bdb3542a2d599fa0764e6d169883877d6f3136b018aea81ec9d"`;
+
+exports[`agent wrap known-answer vectors > canary key is reproducible from the VaultKey and agentId 1`] = `"42bb4442a994367fe6742d1cb2e9027abd336123109944d0875c9b2158fb9398"`;
+
+exports[`agent wrap known-answer vectors > public key fingerprint is SHA-256 of the raw point 1`] = `"7a6d6628d73a137967eb3fe2dfb84a0930a777c146d2a8157c5bcfbeb3d5d43a"`;
+
+exports[`agent wrap known-answer vectors > wrap AAD is reproducible and versioned 1`] = `"000000167478742f76312f6167656e742d7661756c742d6b6579000000080000000000000001000000080000000000000001000000108cf3a2b1000040008000000000000001000000108cf3a2b10000400080000000000000a1"`;

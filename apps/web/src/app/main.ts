@@ -10,6 +10,8 @@ import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api, ApiRequestError } from "./api.ts";
+import type { AgentSummary } from "./api.ts";
+import { agentFingerprintDisplay, buildAgentWrapPayload } from "./agents.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
 import {
@@ -1220,6 +1222,207 @@ async function performStepUp(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Agent management (design §4.3, §7.1)                                */
+/* ------------------------------------------------------------------ */
+
+function agentStateLabel(agent: AgentSummary): string {
+  const name = agent.displayName || "名称未設定";
+  const state =
+    agent.state === "active" ? "有効" : agent.state === "pending" ? "登録途中" : "失効済み";
+  const token = agent.tokens.find((entry) => entry.revokedAt === null);
+  const tokenNote = token
+    ? `トークン期限 ${new Date(token.expiresAt).toLocaleDateString("ja-JP")}`
+    : "トークンなし";
+  return `${name}（${state}、${tokenNote}）`;
+}
+
+/** Lists registered agents and offers add / revoke (design §7.1). */
+async function manageAgents(): Promise<void> {
+  if (!state.unlocked) return;
+  let agents: AgentSummary[] = [];
+  try {
+    agents = (await api.agents()).agents;
+  } catch (error) {
+    toast((error as Error).message);
+    return;
+  }
+  const live = agents.filter((agent) => agent.state !== "revoked");
+  const body = document.createElement("div");
+  if (live.length === 0) {
+    body.append(textParagraph("登録済みのエージェントはありません。"));
+  } else {
+    for (const agent of live) body.append(textParagraph(agentStateLabel(agent)));
+  }
+  body.append(
+    textParagraph("エージェントはこの端末の外で復号します。本文がエージェント側へ渡る範囲を確認してから追加してください。"),
+  );
+  const decision = await showDialog({
+    title: "エージェント",
+    body,
+    actions: [
+      { label: "エージェントを追加", value: "add" },
+      ...live.map((agent) => ({
+        label: `失効: ${agent.displayName || "名称未設定"}`,
+        value: `revoke:${agent.agentId}`,
+        tone: "danger" as const,
+      })),
+      { label: "閉じる", value: "close", primary: false },
+    ],
+  });
+  if (decision === "add") {
+    await addAgentFlow();
+    return;
+  }
+  if (decision.startsWith("revoke:")) {
+    const agentId = decision.slice("revoke:".length);
+    const target = live.find((agent) => agent.agentId === agentId);
+    const confirmed = await showDialog({
+      title: "エージェントを失効しますか",
+      body: `${target?.displayName || "名称未設定"} の鍵ラップとトークンが無効になり、以後このエージェントは本文を取得できなくなります。`,
+      actions: [
+        { label: "失効する", value: "confirm", tone: "danger" },
+        { label: "やめる", value: "cancel", primary: false },
+      ],
+    });
+    if (confirmed === "confirm") {
+      try {
+        await performStepUp();
+        await api.revokeAgent(agentId);
+        toast("エージェントを失効しました。");
+      } catch (error) {
+        toast((error as Error).message);
+      }
+    }
+  }
+}
+
+/**
+ * Registration flow (design §4.3): step-up -> enrollment (pairing code) ->
+ * public key (pasted here, or submitted by the agent with the code) ->
+ * fingerprint comparison -> wrap + canary -> agent-side activation ->
+ * read token issued and shown exactly once.
+ */
+async function addAgentFlow(): Promise<void> {
+  const vault = state.unlocked;
+  if (!vault) return;
+  try {
+    await performStepUp();
+    const enrollment = await api.createAgentEnrollment();
+
+    const body = document.createElement("div");
+    body.append(
+      textParagraph(
+        "MCPサーバー側で登録コマンドを実行し、このペアリングコードを入力してください。表示された公開鍵を下へ貼り付けると、この画面から登録を進められます（MCP側で公開鍵を送信済みの場合は空欄のまま進んでください）。",
+      ),
+    );
+    const codeParagraph = textParagraph(`ペアリングコード: ${enrollment.pairingCode}`);
+    body.append(codeParagraph);
+    body.append(textParagraph(`登録ID: ${enrollment.agentId}`));
+    const nameLabel = document.createElement("label");
+    nameLabel.className = "field";
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = "表示名";
+    const nameInput = document.createElement("textarea");
+    nameInput.rows = 1;
+    nameInput.spellcheck = false;
+    nameInput.autocomplete = "off";
+    nameLabel.append(nameSpan, nameInput);
+    const keyLabel = document.createElement("label");
+    keyLabel.className = "field";
+    const keySpan = document.createElement("span");
+    keySpan.textContent = "エージェントの公開鍵（任意）";
+    const keyInput = document.createElement("textarea");
+    keyInput.rows = 3;
+    keyInput.spellcheck = false;
+    keyInput.autocomplete = "off";
+    keyLabel.append(keySpan, keyInput);
+    body.append(nameLabel, keyLabel);
+
+    const step = await showDialog({
+      title: "エージェントを追加",
+      body,
+      actions: [
+        { label: "進む", value: "next" },
+        { label: "やめる", value: "cancel", primary: false },
+      ],
+    });
+    if (step !== "next") return;
+
+    const displayName = nameInput.value.trim();
+    const pastedKey = keyInput.value.trim();
+    if (pastedKey) {
+      await api.submitAgentPublicKey(enrollment.agentId, {
+        publicKey: pastedKey,
+        ...(displayName ? { displayName } : {}),
+      });
+    }
+    const status = await api.agentEnrollment(enrollment.agentId);
+    if (!status.publicKey) {
+      toast("公開鍵がまだ登録されていません。MCP側で登録してから、もう一度お試しください。");
+      return;
+    }
+
+    const fingerprint = await agentFingerprintDisplay(status.publicKey);
+    const match = await showDialog({
+      title: "フィンガープリントの確認",
+      body: `MCPサーバー側に表示されたフィンガープリントと一致しますか。\n${fingerprint}`,
+      actions: [
+        { label: "一致する", value: "yes" },
+        { label: "一致しない", value: "no", primary: false },
+      ],
+    });
+    if (match !== "yes") {
+      toast("登録を中止しました。公開鍵を確認してください。");
+      return;
+    }
+
+    const payload = await buildAgentWrapPayload({
+      vaultKey: vault.vaultKey,
+      accountId: vault.accountId,
+      agentId: enrollment.agentId,
+      publicKeyB64: status.publicKey,
+    });
+    await api.saveAgentWrap(enrollment.agentId, { ...payload });
+
+    // The agent proves possession by returning the canary plaintext; poll
+    // briefly so the common case completes in one sitting.
+    let active = false;
+    for (let attempt = 0; attempt < 15 && !active; attempt++) {
+      await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      const current = await api.agentEnrollment(enrollment.agentId).catch(() => null);
+      active = current?.state === "active";
+    }
+    if (!active) {
+      toast("ラップを保存しました。MCP側で有効化を完了してから、トークンを発行してください。");
+      return;
+    }
+
+    const issued = await api.issueAgentToken(enrollment.agentId);
+    const tokenBody = document.createElement("div");
+    tokenBody.append(
+      textParagraph("エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。"),
+    );
+    const tokenLabel = document.createElement("label");
+    tokenLabel.className = "field";
+    const tokenSpan = document.createElement("span");
+    tokenSpan.textContent = "トークン";
+    const tokenInput = document.createElement("textarea");
+    tokenInput.rows = 2;
+    tokenInput.readOnly = true;
+    tokenInput.value = issued.token;
+    tokenLabel.append(tokenSpan, tokenInput);
+    tokenBody.append(tokenLabel);
+    await showDialog({
+      title: "トークンを発行しました",
+      body: tokenBody,
+      actions: [{ label: "閉じる", value: "close" }],
+    });
+  } catch (error) {
+    toast((error as Error).message);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* "その他" menu (spec §4.6)                                           */
 /* ------------------------------------------------------------------ */
 
@@ -1238,6 +1441,7 @@ async function showMoreMenu(): Promise<void> {
       { label: "今すぐロック", value: "lock-now", icon: "lock" },
       { label: "パスキーを追加", value: "add-passkey", icon: "key" },
       { label: "復旧キーを更新", value: "rotate-recovery", icon: "refresh" },
+      { label: "エージェント", value: "agents", icon: "device" },
       { label: "使い方", value: "help", icon: "help" },
       // Shares the app's URL only — never the sheet (spec §4.6).
       { label: "txt を紹介する", value: "share", icon: "share" },
@@ -1300,6 +1504,9 @@ async function showMoreMenu(): Promise<void> {
       } catch (error) {
         toast((error as Error).message);
       }
+      break;
+    case "agents":
+      await manageAgents();
       break;
     case "rotate-recovery": {
       try {

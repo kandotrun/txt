@@ -79,6 +79,45 @@ export interface RecoveryRecord {
   wrappedKey: string;
 }
 
+/* Agent access (design §7.1): management is Web-session only. */
+export interface AgentEnrollment {
+  agentId: string;
+  pairingCode: string;
+  expiresAt: number;
+}
+
+export interface AgentEnrollmentStatus {
+  agentId: string;
+  state: string;
+  displayName: string;
+  publicKey: string | null;
+  fingerprint: string | null;
+  enrollmentExpiresAt: number | null;
+  hasWrap: boolean;
+  canaryReady: boolean;
+}
+
+export interface AgentTokenSummary {
+  tokenId: string;
+  scopes: string[];
+  expiresAt: number;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface AgentSummary {
+  agentId: string;
+  displayName: string;
+  state: string;
+  fingerprint: string | null;
+  createdAt: number;
+  activatedAt: number | null;
+  revokedAt: number | null;
+  lastUsedAt: number | null;
+  tokens: AgentTokenSummary[];
+}
+
 class ApiClient {
   private async request<T>(
     path: string,
@@ -254,6 +293,58 @@ class ApiClient {
       method: "PUT",
       json: payload,
     });
+  }
+
+  /* agents */
+  createAgentEnrollment(displayName?: string) {
+    return this.request<AgentEnrollment>("/api/v1/agents/enrollments", {
+      method: "POST",
+      json: displayName ? { displayName } : {},
+    });
+  }
+
+  agentEnrollment(agentId: string) {
+    return this.request<AgentEnrollmentStatus>(
+      `/api/v1/agents/enrollments/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  submitAgentPublicKey(agentId: string, payload: { publicKey: string; displayName?: string }) {
+    return this.request<{ ok: boolean; agentId: string; fingerprint: string }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/pubkey`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  saveAgentWrap(agentId: string, payload: Record<string, unknown>) {
+    return this.request<{ ok: boolean; agentId: string; state: string }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/wrap`,
+      { method: "POST", json: payload },
+    );
+  }
+
+  issueAgentToken(agentId: string) {
+    return this.request<{ tokenId: string; token: string; scope: string; expiresAt: number }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/tokens`,
+      { method: "POST", json: {} },
+    );
+  }
+
+  agents() {
+    return this.request<{ agents: AgentSummary[] }>("/api/v1/agents");
+  }
+
+  revokeAgent(agentId: string) {
+    return this.request<{ ok: boolean }>(`/api/v1/agents/${encodeURIComponent(agentId)}`, {
+      method: "DELETE",
+    });
+  }
+
+  revokeAgentToken(agentId: string, tokenId: string) {
+    return this.request<{ ok: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(agentId)}/tokens/${encodeURIComponent(tokenId)}`,
+      { method: "DELETE" },
+    );
   }
 
   /* document */

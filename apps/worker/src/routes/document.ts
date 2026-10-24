@@ -9,10 +9,18 @@
 
 import { Hono } from "hono";
 
-import type { AppBindings } from "../context.ts";
+import type { AppBindings, AppContext } from "../context.ts";
 import { requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, touchSession } from "../auth/sessions.ts";
-import { badRequest, preconditionRequired } from "../errors.ts";
+import {
+  AGENT_READ_SCOPE,
+  hasAuthorizationHeader,
+  rejectAgentWrite,
+  requireAgentAuth,
+  touchAgentAuth,
+} from "../auth/agent.ts";
+import type { AgentAuthContext } from "../auth/agent.ts";
+import { ApiError, badRequest, preconditionRequired } from "../errors.ts";
 import {
   applyDocumentUpdate,
   encodeBase64Url,
@@ -26,15 +34,40 @@ import { nowMs } from "../util.ts";
 
 const routes = new Hono<AppBindings>();
 
-routes.get("/document", async (c) => {
+/**
+ * Resolves the reader of GET /document: a Web cookie session OR an agent
+ * Bearer token (design §5.2, §7.2). The two are never combined — a request
+ * carrying both a session cookie and an Authorization header is rejected
+ * rather than resolved ambiguously, and the Web resolver itself still
+ * refuses Authorization outright (spec §5.4). The document handler below is
+ * shared; only the authorization source differs.
+ */
+async function resolveDocumentReader(
+  c: AppContext,
+): Promise<{ accountId: string; agent: AgentAuthContext | null }> {
+  const hasCookie = (c.req.header("cookie") ?? "").length > 0;
+  const hasBearer = hasAuthorizationHeader(c.req.raw);
+  if (hasCookie && hasBearer) {
+    throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
+  }
+  if (hasBearer) {
+    const agent = await requireAgentAuth(c.req.raw, c.env, AGENT_READ_SCOPE);
+    await touchAgentAuth(c.env, agent);
+    return { accountId: agent.accountId, agent };
+  }
   const auth = await requireAuth(c);
   if (auth.scope === "pending") {
     throw badRequest("document is not available before bootstrap completes");
   }
   await touchSession(c.env, auth);
+  return { accountId: auth.accountId, agent: null };
+}
+
+routes.get("/document", async (c) => {
+  const { accountId } = await resolveDocumentReader(c);
 
   const ifNoneMatch = c.req.header("if-none-match");
-  const meta = await loadDocumentMeta(c.env, auth.accountId);
+  const meta = await loadDocumentMeta(c.env, accountId);
   if (!meta) {
     // The server never generates an empty document on the client's behalf.
     return c.json({ error: { code: "NOT_FOUND", message: "document not found" } }, 404);
@@ -47,7 +80,7 @@ routes.get("/document", async (c) => {
     return c.body(null, 304);
   }
 
-  const row = await loadDocument(c.env, auth.accountId);
+  const row = await loadDocument(c.env, accountId);
   if (!row) {
     return c.json({ error: { code: "NOT_FOUND", message: "document not found" } }, 404);
   }
@@ -82,6 +115,12 @@ routes.get("/document", async (c) => {
 });
 
 routes.put("/document", async (c) => {
+  // Phase 1: agent tokens are read-only. A Bearer-carrying PUT is answered
+  // by the agent path (401 invalid token, 403 valid read token) and never
+  // falls through to the cookie path (design §5.2: no mixing).
+  if (hasAuthorizationHeader(c.req.raw)) {
+    await rejectAgentWrite(c.req.raw, c.env);
+  }
   const auth = await requireAuth(c);
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
   if (auth.scope !== "active") {

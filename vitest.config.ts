@@ -4,6 +4,7 @@ export default defineConfig({
   test: {
     include: [
       "tests/protocol/**/*.test.ts",
+      "tests/agent/**/*.test.ts",
       "tests/editor/**/*.test.ts",
       "tests/sync/**/*.test.ts",
       "tests/security/**/*.test.ts",

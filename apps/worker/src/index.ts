@@ -21,6 +21,7 @@ import { ApiError } from "./errors.ts";
 import { authRoutes, sessionRoutes } from "./routes/auth.ts";
 import { identityRoutes } from "./routes/identity.ts";
 import { documentRoutes } from "./routes/document.ts";
+import { agentRoutes } from "./routes/agents.ts";
 import { mediaRoutes } from "./routes/media.ts";
 import { accountRoutes } from "./routes/account.ts";
 import { runMaintenance } from "./maintenance.ts";
@@ -95,6 +96,7 @@ app.route("/api/v1/auth", authRoutes);
 app.route("/api/v1", sessionRoutes);
 app.route("/api/v1", identityRoutes);
 app.route("/api/v1", documentRoutes);
+app.route("/api/v1", agentRoutes);
 app.route("/api/v1/media", mediaRoutes);
 app.route("/api/v1", accountRoutes);
 
