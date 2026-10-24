@@ -323,10 +323,10 @@ class ApiClient {
     );
   }
 
-  issueAgentToken(agentId: string) {
+  issueAgentToken(agentId: string, scope: "agent:read" | "agent:write" = "agent:read") {
     return this.request<{ tokenId: string; token: string; scope: string; expiresAt: number }>(
       `/api/v1/agents/${encodeURIComponent(agentId)}/tokens`,
-      { method: "POST", json: {} },
+      { method: "POST", json: { scope } },
     );
   }
 

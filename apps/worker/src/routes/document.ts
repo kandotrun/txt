@@ -14,8 +14,8 @@ import { requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, touchSession } from "../auth/sessions.ts";
 import {
   AGENT_READ_SCOPE,
+  AGENT_WRITE_SCOPE,
   hasAuthorizationHeader,
-  rejectAgentWrite,
   requireAgentAuth,
   touchAgentAuth,
 } from "../auth/agent.ts";
@@ -114,23 +114,18 @@ routes.get("/document", async (c) => {
   });
 });
 
-routes.put("/document", async (c) => {
-  // Phase 1: agent tokens are read-only. A Bearer-carrying PUT is answered
-  // by the agent path (401 invalid token, 403 valid read token) and never
-  // falls through to the cookie path (design §5.2: no mixing).
-  if (hasAuthorizationHeader(c.req.raw)) {
-    await rejectAgentWrite(c.req.raw, c.env);
-  }
-  const auth = await requireAuth(c);
-  assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
-  if (auth.scope !== "active") {
-    throw badRequest("active session required");
-  }
-
+/**
+ * Shared PUT tail for both authorization sources (design §7.2): the CAS
+ * contract — If-Match required, encryptedRevision checked against the
+ * stored revision, mutationId idempotency, 412/409/422 separation in
+ * `applyDocumentUpdate` — is identical whether the writer is the Web
+ * session or an agent token. Only the account resolution differs.
+ */
+async function applyDocumentPut(c: AppContext, accountId: string) {
   const ifMatch = c.req.header("if-match");
   if (!ifMatch) throw preconditionRequired("If-Match is required");
 
-  const row = await loadDocument(c.env, auth.accountId);
+  const row = await loadDocument(c.env, accountId);
   if (!row) {
     return c.json({ error: { code: "NOT_FOUND", message: "document not found" } }, 404);
   }
@@ -141,10 +136,10 @@ routes.put("/document", async (c) => {
     );
   }
 
-  const parsed = await parseDocumentUpdate(c.req.raw, auth.accountId, row.id);
+  const parsed = await parseDocumentUpdate(c.req.raw, accountId, row.id);
   const now = nowMs();
   const result = await applyDocumentUpdate(c.env, {
-    accountId: auth.accountId,
+    accountId,
     documentId: row.id,
     row,
     parsed,
@@ -159,6 +154,30 @@ routes.put("/document", async (c) => {
     mutationId: parsed.update.mutationId,
     updatedAt: result.updatedAt,
   });
+}
+
+routes.put("/document", async (c) => {
+  // Agent path (design §5.2, §7.2; phase 2): a Bearer-carrying PUT is
+  // resolved ONLY as an agent token — 401 for an invalid token, 403 for a
+  // valid token without `agent:write` — and never falls through to the
+  // cookie path. Cookie + Bearer together stay ambiguous and are refused,
+  // exactly like the GET path. The agent path has no Origin/X-Txt-Request
+  // CSRF check: it is not a browser client, and the token is the credential.
+  if (hasAuthorizationHeader(c.req.raw)) {
+    const hasCookie = (c.req.header("cookie") ?? "").length > 0;
+    if (hasCookie) {
+      throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
+    }
+    const agent = await requireAgentAuth(c.req.raw, c.env, AGENT_WRITE_SCOPE);
+    await touchAgentAuth(c.env, agent);
+    return applyDocumentPut(c, agent.accountId);
+  }
+  const auth = await requireAuth(c);
+  assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  if (auth.scope !== "active") {
+    throw badRequest("active session required");
+  }
+  return applyDocumentPut(c, auth.accountId);
 });
 
 export const documentRoutes = routes;

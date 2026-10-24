@@ -1300,7 +1300,9 @@ async function manageAgents(): Promise<void> {
  * Registration flow (design §4.3): step-up -> enrollment (pairing code) ->
  * public key (pasted here, or submitted by the agent with the code) ->
  * fingerprint comparison -> wrap + canary -> agent-side activation ->
- * read token issued and shown exactly once.
+ * token issued and shown exactly once. The token scope is the user's
+ * explicit choice at issuance time: read-only by default; a write token
+ * (which includes read) exists only when the user picks it (design §5.3).
  */
 async function addAgentFlow(): Promise<void> {
   const vault = state.unlocked;
@@ -1397,7 +1399,20 @@ async function addAgentFlow(): Promise<void> {
       return;
     }
 
-    const issued = await api.issueAgentToken(enrollment.agentId);
+    const scopeChoice = await showDialog({
+      title: "トークンの権限",
+      body: "読み取り専用トークンか、読み書きトークン（読み取りを含みます）を選んでください。書き込みはMCPサーバー側の安全策（追記優先・置換は承認制）の対象です。",
+      actions: [
+        { label: "読み取りのみ", value: "agent:read" },
+        { label: "読み書き", value: "agent:write", primary: false },
+        { label: "発行しない", value: "cancel", primary: false },
+      ],
+    });
+    if (scopeChoice !== "agent:read" && scopeChoice !== "agent:write") {
+      toast("ラップと有効化は完了しました。トークンはエージェント管理から後で発行できます。");
+      return;
+    }
+    const issued = await api.issueAgentToken(enrollment.agentId, scopeChoice);
     const tokenBody = document.createElement("div");
     tokenBody.append(
       textParagraph("エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。"),

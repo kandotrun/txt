@@ -147,11 +147,15 @@ async function postJson(
 interface EnrolledAgent {
   agentId: string;
   token: string;
+  scope: string;
   keyPair: CryptoKeyPair;
 }
 
-/** Runs the full enrollment dance and returns an active agent + read token. */
-async function enrollAgent(account: SeededAccount): Promise<EnrolledAgent> {
+/** Runs the full enrollment dance and returns an active agent + token. */
+async function enrollAgent(
+  account: SeededAccount,
+  scope?: "agent:write",
+): Promise<EnrolledAgent> {
   const cookieHeaders = { ...webHeaders, cookie: account.cookie };
 
   const created = await postJson("/api/v1/agents/enrollments", { displayName: "Test Agent" }, cookieHeaders);
@@ -235,12 +239,83 @@ async function enrollAgent(account: SeededAccount): Promise<EnrolledAgent> {
   );
   expect(activated.status).toBe(200);
 
-  const issued = await postJson(`/api/v1/agents/${agentId}/tokens`, {}, cookieHeaders);
+  const issued = await postJson(
+    `/api/v1/agents/${agentId}/tokens`,
+    scope ? { scope } : {},
+    cookieHeaders,
+  );
   expect(issued.status).toBe(201);
-  const { token } = (await issued.json()) as { token: string };
+  const { token, scope: issuedScope } = (await issued.json()) as { token: string; scope: string };
   expect(token.startsWith("txta1.")).toBe(true);
+  expect(issuedScope).toBe(scope ?? "agent:read");
 
-  return { agentId, token, keyPair };
+  return { agentId, token, scope: issuedScope, keyPair };
+}
+
+/** Builds a protocol-valid PUT /document body for a new plaintext model. */
+async function buildPutBody(
+  account: SeededAccount,
+  model: DocumentModel,
+  encryptedRevision: number,
+  mutationId: string = crypto.randomUUID(),
+): Promise<Record<string, unknown>> {
+  const docKey = await deriveDocumentKey(
+    account.vaultKey,
+    mutationId,
+    account.accountId,
+    account.documentId,
+    1,
+  );
+  const nonce = random(12);
+  const ciphertext = await aesGcmEncrypt(
+    docKey,
+    nonce,
+    new TextEncoder().encode(serializeDocument(model)),
+    documentAad(1, 1, account.accountId, account.documentId, mutationId, encryptedRevision),
+  );
+  return {
+    mutationId,
+    formatVersion: 1,
+    keyVersion: 1,
+    encryptedRevision,
+    nonce: b64(nonce),
+    ciphertext: b64(ciphertext),
+    referencedMediaIds: [] as string[],
+  };
+}
+
+async function putDocument(
+  token: string,
+  account: SeededAccount,
+  body: Record<string, unknown>,
+  etag: string,
+  extraHeaders: Record<string, string> = {},
+): Promise<Response> {
+  return SELF.fetch(`${BASE}/api/v1/document`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "if-match": etag,
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function textModel(text: string): DocumentModel {
+  return {
+    schemaVersion: 1,
+    blocks: [{ id: crypto.randomUUID(), type: "text", text }],
+    media: {},
+  };
+}
+
+async function getDocument(token: string): Promise<{ status: number; body: Record<string, unknown> }> {
+  const response = await SELF.fetch(`${BASE}/api/v1/document`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  return { status: response.status, body: (await response.json()) as Record<string, unknown> };
 }
 
 describe("agent access phase 1", () => {
@@ -499,7 +574,7 @@ describe("agent access phase 1", () => {
     expect(listed.agents.find((entry) => entry.agentId === agentId)?.state).toBe("pending");
   });
 
-  it("requires step-up for management and refuses write-scope issuance in phase 1", async () => {
+  it("requires step-up for management operations", async () => {
     const noStepUp = await seedAccount({ stepUp: false });
     const denied = await postJson(
       "/api/v1/agents/enrollments",
@@ -507,15 +582,6 @@ describe("agent access phase 1", () => {
       { ...webHeaders, cookie: noStepUp.cookie },
     );
     expect(denied.status).toBe(403);
-
-    const account = await seedAccount();
-    const agent = await enrollAgent(account);
-    const writeScope = await postJson(
-      `/api/v1/agents/${agent.agentId}/tokens`,
-      { scope: "agent:write" },
-      { ...webHeaders, cookie: account.cookie },
-    );
-    expect(writeScope.status).toBe(403);
   });
 
   it("keeps the Web session surface cookie-only against agent tokens", async () => {
@@ -537,5 +603,187 @@ describe("agent access phase 1", () => {
       headers: { authorization: `Bearer ${account.sessionToken}` },
     });
     expect(rawSession.status).toBe(401);
+  });
+});
+
+describe("agent access phase 2 (write)", () => {
+  it("issues a write token (step-up Web session only) and PUTs through the CAS", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    expect(agent.scope).toBe("agent:write");
+    const etag0 = `"d-${account.documentId}-e-1-r0"`;
+
+    const body = await buildPutBody(account, textModel("written by agent\n"), 1);
+    const response = await putDocument(agent.token, account, body, etag0);
+    expect(response.status).toBe(200);
+    const result = (await response.json()) as { revision: number; mutationId: string };
+    expect(result.revision).toBe(1);
+    expect(result.mutationId).toBe(body.mutationId);
+
+    // The stored ciphertext decrypts to exactly what the agent wrote.
+    const after = await getDocument(agent.token);
+    expect(after.status).toBe(200);
+    expect(after.body.revision).toBe(1);
+    const docKey = await deriveDocumentKey(
+      account.vaultKey,
+      after.body.mutationId as string,
+      account.accountId,
+      account.documentId,
+      1,
+    );
+    const plaintext = await aesGcmDecrypt(
+      docKey,
+      fromBase64Url(after.body.nonce as string),
+      fromBase64Url(after.body.ciphertext as string),
+      documentAad(
+        1,
+        1,
+        account.accountId,
+        account.documentId,
+        after.body.mutationId as string,
+        after.body.encryptedRevision as number,
+      ),
+    );
+    expect(plainTextForCopy(parseDocument(plaintext))).toBe("written by agent\n");
+  });
+
+  it("a write token also satisfies read requirements (envelope + GET)", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    const envelope = await SELF.fetch(`${BASE}/api/v1/agent/envelope`, {
+      headers: { authorization: `Bearer ${agent.token}` },
+    });
+    expect(envelope.status).toBe(200);
+    const document = await getDocument(agent.token);
+    expect(document.status).toBe(200);
+  });
+
+  it("answers 412 for a stale ETag and leaves the document untouched", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    const etag0 = `"d-${account.documentId}-e-1-r0"`;
+
+    const stale = await putDocument(
+      agent.token,
+      account,
+      await buildPutBody(account, textModel("nope"), 1),
+      `"d-${account.documentId}-e-1-r99"`,
+    );
+    expect(stale.status).toBe(412);
+
+    const first = await putDocument(
+      agent.token,
+      account,
+      await buildPutBody(account, textModel("first write"), 1),
+      etag0,
+    );
+    expect(first.status).toBe(200);
+
+    // Replaying against the now-stale r0 ETag is a conflict, not an overwrite.
+    const replay = await putDocument(
+      agent.token,
+      account,
+      await buildPutBody(account, textModel("second write"), 1),
+      etag0,
+    );
+    expect(replay.status).toBe(412);
+    const after = await getDocument(agent.token);
+    expect(after.body.revision).toBe(1);
+  });
+
+  it("treats an identical mutationId re-send as a no-op and a different payload as 409", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    const etag0 = `"d-${account.documentId}-e-1-r0"`;
+    const etag1 = `"d-${account.documentId}-e-1-r1"`;
+
+    const mutationId = crypto.randomUUID();
+    const body = await buildPutBody(account, textModel("idempotent"), 1, mutationId);
+    const first = await putDocument(agent.token, account, body, etag0);
+    expect(first.status).toBe(200);
+
+    // Same mutationId + same payload, presented against the current ETag:
+    // success without advancing the revision (§10.3).
+    const resent = await putDocument(agent.token, account, body, etag1);
+    expect(resent.status).toBe(200);
+    const afterResend = await getDocument(agent.token);
+    expect(afterResend.body.revision).toBe(1);
+
+    // Same mutationId, different payload: 409, still no change.
+    const conflicting = await buildPutBody(account, textModel("different"), 2, mutationId);
+    const conflict = await putDocument(agent.token, account, conflicting, etag1);
+    expect(conflict.status).toBe(409);
+    const afterConflict = await getDocument(agent.token);
+    expect(afterConflict.body.revision).toBe(1);
+  });
+
+  it("answers 401 for a write with a revoked token and 403 for unknown scopes at issuance", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    const cookieHeaders = { ...webHeaders, cookie: account.cookie };
+
+    const unknownScope = await postJson(
+      `/api/v1/agents/${agent.agentId}/tokens`,
+      { scope: "agent:admin" },
+      cookieHeaders,
+    );
+    expect(unknownScope.status).toBe(403);
+
+    const listed = (await (
+      await SELF.fetch(`${BASE}/api/v1/agents`, { headers: { cookie: account.cookie } })
+    ).json()) as {
+      agents: Array<{ agentId: string; tokens: Array<{ tokenId: string; scopes: string[] }> }>;
+    };
+    const mine = listed.agents.find((entry) => entry.agentId === agent.agentId);
+    expect(mine?.tokens[0]?.scopes).toEqual(["agent:write"]);
+    const tokenId = mine?.tokens[0]?.tokenId as string;
+
+    const drop = await SELF.fetch(
+      `${BASE}/api/v1/agents/${agent.agentId}/tokens/${tokenId}`,
+      { method: "DELETE", headers: cookieHeaders },
+    );
+    expect(drop.status).toBe(200);
+
+    const response = await putDocument(
+      agent.token,
+      account,
+      await buildPutBody(account, textModel("must not land"), 1),
+      `"d-${account.documentId}-e-1-r0"`,
+    );
+    expect(response.status).toBe(401);
+    const after = await SELF.fetch(`${BASE}/api/v1/document`, {
+      headers: { cookie: account.cookie },
+    });
+    expect(((await after.json()) as { revision: number }).revision).toBe(0);
+  });
+
+  it("write issuance requires step-up even for an existing agent", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account);
+    // Drop the step-up stamp: issuance of ANY token now requires re-auth.
+    await TEST_ENV.DB.prepare(`UPDATE sessions SET stepup_at = NULL WHERE account_id = ?1`)
+      .bind(account.accountId)
+      .run();
+    const denied = await postJson(
+      `/api/v1/agents/${agent.agentId}/tokens`,
+      { scope: "agent:write" },
+      { ...webHeaders, cookie: account.cookie },
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("refuses a PUT that mixes a cookie with a Bearer token (401)", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account, "agent:write");
+    const response = await putDocument(
+      agent.token,
+      account,
+      await buildPutBody(account, textModel("mixed auth"), 1),
+      `"d-${account.documentId}-e-1-r0"`,
+      { cookie: account.cookie },
+    );
+    expect(response.status).toBe(401);
+    const after = await getDocument(agent.token);
+    expect(after.body.revision).toBe(0);
   });
 });

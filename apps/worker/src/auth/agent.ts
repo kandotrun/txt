@@ -12,16 +12,27 @@
  *   agentId or accountId (spec §12.2: the owner comes from the credential).
  * - Expiry is absolute (30 days, protocol windows), revocation is immediate,
  *   and the account `auth_epoch` recorded at issuance must still match.
- * - Phase 1 issues `agent:read` only; a valid read token that attempts a
- *   write is a scope failure (403), not an authentication failure (401).
+ * - A valid token that lacks the required scope is a scope failure (403),
+ *   not an authentication failure (401). `agent:write` includes
+ *   `agent:read` (design §5.3, phase 2); the reverse never holds.
  */
 
 import type { Env } from "../types.ts";
-import { ApiError, scopeRequired, unauthorized } from "../errors.ts";
+import { scopeRequired, unauthorized } from "../errors.ts";
 import { bytesEqual, nowMs, sha256 } from "../util.ts";
 
 export const AGENT_TOKEN_PREFIX = "txta1.";
 export const AGENT_READ_SCOPE = "agent:read";
+export const AGENT_WRITE_SCOPE = "agent:write";
+
+/**
+ * Scope check with the design §5.3 inclusion rule: `agent:write` satisfies
+ * a read requirement; a read token never satisfies a write requirement.
+ */
+export function agentHasScope(auth: AgentAuthContext, scope: string): boolean {
+  if (auth.scopes.includes(scope)) return true;
+  return scope === AGENT_READ_SCOPE && auth.scopes.includes(AGENT_WRITE_SCOPE);
+}
 
 export interface AgentAuthContext {
   tokenId: string;
@@ -107,21 +118,10 @@ export async function requireAgentAuth(
 ): Promise<AgentAuthContext> {
   const auth = await resolveAgentAuth(request, env);
   if (!auth) throw unauthorized("agent authentication required");
-  if (!auth.scopes.includes(scope)) {
+  if (!agentHasScope(auth, scope)) {
     throw scopeRequired(`scope ${scope} required`);
   }
   return auth;
-}
-
-/**
- * Phase 1 is read-only: PUT /document authenticates the agent token (401 for
- * invalid tokens) and then refuses with 403, because no write scope exists
- * yet. Kept as one helper so phase 2 only relaxes the scope check.
- */
-export async function rejectAgentWrite(request: Request, env: Env): Promise<never> {
-  const auth = await resolveAgentAuth(request, env);
-  if (!auth) throw unauthorized("agent authentication required");
-  throw new ApiError(403, "SCOPE_REQUIRED", "agent tokens are read-only in phase 1");
 }
 
 /** Best-effort usage stamps; failures never change the request outcome. */

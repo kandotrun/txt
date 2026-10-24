@@ -73,6 +73,34 @@ export interface StoredToken {
   expiresAt: number;
 }
 
+/**
+ * Pre-write ciphertext backup (design §9.5): the full server record of the
+ * document as it was immediately before an agent write, so a bad write can
+ * be rolled back locally. Ciphertext only — never plaintext — and kept in
+ * the same 0600 secret store as the other agent state.
+ */
+export interface CiphertextBackup {
+  version: 1;
+  savedAt: number;
+  accountId: string;
+  documentId: string;
+  syncEpoch: number;
+  revision: number;
+  encryptedRevision: number;
+  formatVersion: number;
+  keyVersion: number;
+  mutationId: string;
+  etag: string | null;
+  nonce: string; // base64url
+  ciphertext: string; // base64url
+  referencedMediaIds: string[];
+  updatedAt: number;
+}
+
+/** Retention from design §9.5/§12: newest 20 generations, at most 7 days. */
+export const MAX_BACKUP_GENERATIONS = 20;
+export const MAX_BACKUP_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
 export function stateDir(): string {
   return process.env.TXT_AGENT_HOME ?? path.join(homedir(), ".config", "txt-agent");
 }
@@ -131,6 +159,35 @@ export class AgentState {
 
   saveToken(token: StoredToken): void {
     this.secrets.write("token.json", JSON.stringify(token));
+  }
+
+  /** Newest-first list of pre-write ciphertext backups. */
+  loadCiphertextBackups(): CiphertextBackup[] {
+    const raw = this.secrets.read("backups.json");
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as CiphertextBackup[];
+    return Array.isArray(parsed) ? parsed : [];
+  }
+
+  /**
+   * Records one backup generation. Saving the same server record twice
+   * (same document + mutationId) is a no-op so failed/conflicted writes do
+   * not burn generations on duplicates.
+   */
+  saveCiphertextBackup(backup: CiphertextBackup): void {
+    const existing = this.loadCiphertextBackups();
+    if (
+      existing.length > 0 &&
+      existing[0]?.documentId === backup.documentId &&
+      existing[0]?.mutationId === backup.mutationId
+    ) {
+      return;
+    }
+    const cutoff = backup.savedAt - MAX_BACKUP_AGE_MS;
+    const kept = [backup, ...existing]
+      .filter((entry) => entry.savedAt >= cutoff)
+      .slice(0, MAX_BACKUP_GENERATIONS);
+    this.secrets.write("backups.json", JSON.stringify(kept));
   }
 
   /** Append-only audit log (design §8.5). Metadata only — never content. */

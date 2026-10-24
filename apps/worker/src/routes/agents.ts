@@ -22,6 +22,7 @@ import { clientBucketKey, enforceRateLimit, requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, requireStepUp } from "../auth/sessions.ts";
 import {
   AGENT_READ_SCOPE,
+  AGENT_WRITE_SCOPE,
   requireAgentAuth,
   touchAgentAuth,
 } from "../auth/agent.ts";
@@ -361,10 +362,16 @@ routes.post("/agents/:id/tokens", async (c) => {
     () => ({}) as Record<string, unknown>,
   );
   const requestedScope = body.scope;
-  if (requestedScope !== undefined && requestedScope !== AGENT_READ_SCOPE) {
-    // Phase 1 issues read-only tokens; write arrives in phase 2 (design §10).
-    throw scopeRequired("only agent:read tokens are issued in phase 1");
+  if (
+    requestedScope !== undefined &&
+    requestedScope !== AGENT_READ_SCOPE &&
+    requestedScope !== AGENT_WRITE_SCOPE
+  ) {
+    throw scopeRequired("scope must be agent:read or agent:write");
   }
+  // Default stays read-only; a write token exists only when the user
+  // explicitly asks for it here (design §5.3). `agent:write` includes read.
+  const issuedScope = requestedScope === AGENT_WRITE_SCOPE ? AGENT_WRITE_SCOPE : AGENT_READ_SCOPE;
 
   const account = await c.env.DB.prepare(`SELECT auth_epoch FROM accounts WHERE id = ?1`)
     .bind(auth.accountId)
@@ -387,7 +394,7 @@ routes.post("/agents/:id/tokens", async (c) => {
       hash.buffer as ArrayBuffer,
       row.agent_id,
       auth.accountId,
-      AGENT_READ_SCOPE,
+      issuedScope,
       account.auth_epoch,
       expiresAt,
       now,
@@ -395,7 +402,7 @@ routes.post("/agents/:id/tokens", async (c) => {
     .run();
 
   // The plaintext token is returned exactly once (design §5.3).
-  return c.json({ tokenId, token, scope: AGENT_READ_SCOPE, expiresAt }, 201);
+  return c.json({ tokenId, token, scope: issuedScope, expiresAt }, 201);
 });
 
 routes.delete("/agents/:id/tokens/:tokenId", async (c) => {
