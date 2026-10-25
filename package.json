@@ -29,7 +29,7 @@
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^4.20250919.0",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^22.20.4",
+    "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12",
