@@ -8,6 +8,7 @@
  */
 
 import { icon } from "./icons.ts";
+import { t } from "./i18n.ts";
 import { cancelExit, playExit, prefersReducedMotion, replayEnter } from "./motion.ts";
 import {
   INTRO_SLIDES,
@@ -155,7 +156,7 @@ function buildArt(id: IntroSlideId, alive: () => boolean): HTMLElement {
   switch (id) {
     case "sheet": {
       const sheet = element("div", "art-sheet");
-      ["ここから書く。", "空白も改行も", "そのまま残る。"].forEach((line, index) => {
+      [t("ここから書く。"), t("空白も改行も"), t("そのまま残る。")].forEach((line, index) => {
         sheet.append(element("span", `art-line l${index + 1}`, line));
       });
       sheet.append(element("span", "art-caret"));
@@ -169,8 +170,8 @@ function buildArt(id: IntroSlideId, alive: () => boolean): HTMLElement {
       break;
     }
     case "encrypt": {
-      const cipher = element("span", "art-cipher", "こんにちは");
-      art.append(element("span", "art-plain", "こんにちは"), element("span", "art-arrow", "→"), cipher);
+      const cipher = element("span", "art-cipher", t("こんにちは"));
+      art.append(element("span", "art-plain", t("こんにちは")), element("span", "art-arrow", "→"), cipher);
       scramble(cipher, "a8F#q2Zk", alive);
       break;
     }

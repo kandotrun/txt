@@ -9,6 +9,7 @@
  * (spec §4.5, §9).
  */
 
+import { t } from "./i18n.ts";
 import { playExit } from "./motion.ts";
 
 export interface CoachHint {
@@ -22,7 +23,7 @@ export function showCoachMarks(layer: HTMLElement, hints: CoachHint[]): () => vo
   const ok = document.createElement("button");
   ok.type = "button";
   ok.className = "coach-ok";
-  ok.textContent = "わかった";
+  ok.textContent = t("わかった");
 
   layer.replaceChildren(
     ...hints.map((hint, index) => {

@@ -16,6 +16,7 @@ import { mediaCipherLength } from "../../../../packages/protocol/src/crypto.ts";
 import { MEDIA_SIZE_LIMITS } from "../../../../packages/protocol/src/media-limits.ts";
 import type { MediaInfo, MediaKind } from "../../../../packages/protocol/src/document.ts";
 import { api, ApiRequestError } from "./api.ts";
+import { t } from "./i18n.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
 
 const IMAGE_TYPES = new Set([
@@ -56,19 +57,19 @@ export class MediaRejectedError extends Error {
 export function classify(file: File): MediaKind {
   const type = file.type.toLowerCase();
   if (IMAGE_TYPES.has(type)) {
-    if (file.size > SIZE_LIMITS.image) throw new MediaRejectedError("画像は100MBまでです。");
+    if (file.size > SIZE_LIMITS.image) throw new MediaRejectedError(t("画像は100MBまでです。"));
     return "image";
   }
   if (VIDEO_TYPES.has(type)) {
-    if (file.size > SIZE_LIMITS.video) throw new MediaRejectedError("動画は10GBまでです。");
+    if (file.size > SIZE_LIMITS.video) throw new MediaRejectedError(t("動画は10GBまでです。"));
     return "video";
   }
   if (AUDIO_TYPES.has(type)) {
-    if (file.size > SIZE_LIMITS.audio) throw new MediaRejectedError("音声は100MiBまでです。");
+    if (file.size > SIZE_LIMITS.audio) throw new MediaRejectedError(t("音声は100MiBまでです。"));
     return "audio";
   }
   // SVG, HTML, PDF, executables and everything else are refused in the UI.
-  throw new MediaRejectedError("この形式のファイルは添付できません。");
+  throw new MediaRejectedError(t("この形式のファイルは添付できません。"));
 }
 
 export interface UploadTarget {
@@ -199,7 +200,7 @@ export async function uploadFile(options: {
   onStarted: (mediaId: string) => void;
 }): Promise<UploadResult> {
   const { file, kind, documentId, bridge } = options;
-  if (file.size === 0) throw new MediaRejectedError("空のファイルは添付できません。");
+  if (file.size === 0) throw new MediaRejectedError(t("空のファイルは添付できません。"));
 
   const cipherBytes = mediaCipherLength(file.size);
   const chunkCount = Math.ceil(file.size / CHUNK_PLAIN_BYTES);
@@ -252,7 +253,7 @@ export async function uploadFile(options: {
 
       const expected = endByte - startByte;
       if (partOffset !== expected) {
-        throw new Error("暗号化したパートの長さが一致しません。");
+        throw new Error(t("暗号化したパートの長さが一致しません。"));
       }
       await uploadPart(start.mediaId, partIndex + 1, partBuffer, options.signal);
       uploadedParts += 1;
@@ -291,7 +292,7 @@ export async function fetchDecrypted(options: {
   const response = await fetch(`/api/v1/media/${encodeURIComponent(mediaId)}/cipher`, {
     credentials: "same-origin",
   });
-  if (!response.ok) throw new Error("メディアを取得できません。");
+  if (!response.ok) throw new Error(t("メディアを取得できません。"));
   const ciphertext = new Uint8Array(await response.arrayBuffer());
   const chunkCount = info.chunkCount;
   const plaintext = new Uint8Array(info.plainBytes);

@@ -5,6 +5,8 @@
  * unit-testable without a DOM. Rendering lives in `onboarding.ts`.
  */
 
+import { t } from "./i18n.ts";
+
 export type IntroMode = "register" | "replay";
 
 export type IntroSlideId = "sheet" | "passkey" | "encrypt" | "recovery";
@@ -18,23 +20,23 @@ export interface IntroSlide {
 export const INTRO_SLIDES: readonly IntroSlide[] = [
   {
     id: "sheet",
-    title: "1枚だけ",
-    body: "タイトルも一覧もありません。開けばすぐ書けて、自動で保存・同期されます。",
+    title: t("1枚だけ"),
+    body: t("タイトルも一覧もありません。開けばすぐ書けて、自動で保存・同期されます。"),
   },
   {
     id: "passkey",
-    title: "パスキーで開く",
-    body: "メールアドレスもパスワードも要りません。指紋・顔・端末のロック解除などで開きます。",
+    title: t("パスキーで開く"),
+    body: t("メールアドレスもパスワードも要りません。指紋・顔・端末のロック解除などで開きます。"),
   },
   {
     id: "encrypt",
-    title: "端末で暗号化",
-    body: "本文と添付はこの端末で暗号化され、サーバーには暗号文だけが届きます。運営者も中身を読めません。",
+    title: t("端末で暗号化"),
+    body: t("本文と添付はこの端末で暗号化され、サーバーには暗号文だけが届きます。運営者も中身を読めません。"),
   },
   {
     id: "recovery",
-    title: "復旧キーを控える",
-    body: "パスキーを失くしたときに開ける唯一の鍵です。次の画面で表示されるので、パスキーとは別の場所に保存してください。",
+    title: t("復旧キーを控える"),
+    body: t("パスキーを失くしたときに開ける唯一の鍵です。次の画面で表示されるので、パスキーとは別の場所に保存してください。"),
   },
 ];
 
@@ -76,14 +78,14 @@ export function currentSlide(state: IntroState): IntroSlide {
 
 /** Forward button: the last slide carries the call to action. */
 export function primaryLabel(state: IntroState): string {
-  if (!isLast(state)) return "次へ";
-  return state.mode === "register" ? "パスキーを作成" : "閉じる";
+  if (!isLast(state)) return t("次へ");
+  return state.mode === "register" ? t("パスキーを作成") : t("閉じる");
 }
 
 /** Backward button: on the first slide it leaves the intro. */
 export function secondaryLabel(state: IntroState): string {
-  if (!isFirst(state)) return "戻る";
-  return state.mode === "register" ? "やめる" : "閉じる";
+  if (!isFirst(state)) return t("戻る");
+  return state.mode === "register" ? t("やめる") : t("閉じる");
 }
 
 export function progressLabel(state: IntroState): string {

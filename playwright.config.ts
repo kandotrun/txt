@@ -20,6 +20,9 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"]],
   use: {
+    // The app auto-detects the UI language from the browser; the suite is
+    // written against the Japanese UI, so pin the browser locale (§4.7).
+    locale: "ja-JP",
     baseURL: process.env.TXT_BASE_URL ?? "http://localhost:8799",
     trace: "retain-on-failure",
     ignoreHTTPSErrors: false,

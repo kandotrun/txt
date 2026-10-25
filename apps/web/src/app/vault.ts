@@ -21,6 +21,7 @@ import {
 } from "../../../../packages/protocol/src/crypto.ts";
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api } from "./api.ts";
+import { t } from "./i18n.ts";
 import type { KeyEnvelope, RecoveryRecord } from "./api.ts";
 import { assertCredential, createCredential, WebAuthnError } from "./webauthn.ts";
 
@@ -186,14 +187,14 @@ export async function loginAndUnlock(): Promise<UnlockedVault> {
   if (!assertion.prfOutput) {
     throw new WebAuthnError(
       "no-prf",
-      "この環境では、このパスキーで暗号化された内容を開けません。",
+      t("この環境では、このパスキーで暗号化された内容を開けません。"),
     );
   }
 
   const keys = await api.keys();
   const envelope = keys.envelopes.find((entry) => entry.credentialId === verified.credentialId);
   if (!envelope) {
-    throw new Error("このパスキー用の鍵が見つかりません。");
+    throw new Error(t("このパスキー用の鍵が見つかりません。"));
   }
   const vaultKey = await unwrapFromEnvelope({
     envelope,
@@ -227,7 +228,7 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
 
   const keys = await api.keys();
   const recovery = keys.recovery;
-  if (!recovery) throw new Error("復旧情報が見つかりません。");
+  if (!recovery) throw new Error(t("復旧情報が見つかりません。"));
   const recoveryKek = await deriveRecoveryKek(parsed.seed, parsed.accountId);
   const aad = recoveryAad(parsed.accountId, recovery.recoveryVersion, recovery.keyVersion);
   const { fromBase64Url } = await import("../../../../packages/protocol/src/base64url.ts");
@@ -283,7 +284,7 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
 async function currentUserHandle(): Promise<string> {
   const session = await api.session();
   if (!session.userHandle) {
-    throw new Error("このアカウントのパスキー情報を取得できません。");
+    throw new Error(t("このアカウントのパスキー情報を取得できません。"));
   }
   return session.userHandle;
 }
@@ -359,13 +360,13 @@ export async function unlockExisting(vault: {
   const assertion = await assertCredential(stepup.options);
   // A fresh assertion provides a fresh PRF output for the same credential.
   if (!assertion.prfOutput) {
-    throw new WebAuthnError("no-prf", "この環境では、このパスキーで暗号化された内容を開けません。");
+    throw new WebAuthnError("no-prf", t("この環境では、このパスキーで暗号化された内容を開けません。"));
   }
   const keys = await api.keys();
   const envelope = keys.envelopes.find(
     (entry) => entry.credentialId === (assertion.dto.id as string),
   );
-  if (!envelope) throw new Error("このパスキー用の鍵が見つかりません。");
+  if (!envelope) throw new Error(t("このパスキー用の鍵が見つかりません。"));
   const vaultKey = await unwrapFromEnvelope({
     envelope,
     prfOutput: assertion.prfOutput,
@@ -380,5 +381,6 @@ export async function unlockExisting(vault: {
   };
 }
 
-export const RECOVERY_HELP =
-  "復旧キーは端末の外に保管してください。パスキーマネージャーと同じ場所だけに置くと、紛失時に同時に失われます。";
+export const RECOVERY_HELP = t(
+  "復旧キーは端末の外に保管してください。パスキーマネージャーと同じ場所だけに置くと、紛失時に同時に失われます。",
+);

@@ -24,6 +24,7 @@ import { ApiRequestError, api } from "./api.ts";
 import type { DocumentResponse } from "./api.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
 import { saveDraft, clearDraft } from "./drafts.ts";
+import { t } from "./i18n.ts";
 
 export type SyncState =
   | "idle"
@@ -121,7 +122,7 @@ export class SyncEngine {
   /** Initial load. Returns the decrypted document and sets the base ETag. */
   async load(): Promise<{ document: DocumentModel; etag: string }> {
     const { data, etag } = await api.document();
-    if (!data) throw new Error("文書を取得できません。");
+    if (!data) throw new Error(t("文書を取得できません。"));
     this.baseEtag = etag ?? null;
     this.baseRevision = data.revision;
     const document = await this.bridge.decryptDocument({
@@ -275,7 +276,7 @@ export class SyncEngine {
       // No base yet: fetch first so the CAS cannot silently overwrite.
       await this.refreshRemote({ force: true });
       if (this.baseEtag === null) {
-        this.callbacks.onState("offline", "サーバーに接続できません。");
+        this.callbacks.onState("offline", t("サーバーに接続できません。"));
         this.scheduleRetry();
         return;
       }
@@ -359,7 +360,7 @@ export class SyncEngine {
   private async handleSaveError(error: Error, generation: number, mutationId: string): Promise<void> {
     if (error instanceof ApiRequestError) {
       if (error.status === 401) {
-        this.callbacks.onState("auth-expired", "再ログインが必要です。");
+        this.callbacks.onState("auth-expired", t("再ログインが必要です。"));
         return; // no infinite retry on 401
       }
       if (error.status === 412) {
@@ -376,7 +377,7 @@ export class SyncEngine {
       }
       if (error.status === 422) {
         // Reference or integrity violation: keep the input, stop auto-retry.
-        this.callbacks.onState("local-only", "参照の整合性が取れないため保存できません。");
+        this.callbacks.onState("local-only", t("参照の整合性が取れないため保存できません。"));
         return;
       }
       if (error.status === 429) {
@@ -388,16 +389,16 @@ export class SyncEngine {
     }
     // Decrypt failures and unknown formats are not network failures (§10.6).
     if ((error as Error).message?.includes("decrypt")) {
-      this.callbacks.onState("decrypt-failed", "内容を開けません。データは変更していません。");
+      this.callbacks.onState("decrypt-failed", t("内容を開けません。データは変更していません。"));
       return;
     }
     if (error instanceof DocumentFormatError) {
       // Refusing to save keeps the other devices readable; the local copy is
       // preserved and a retry cannot help until the model is repaired.
-      this.callbacks.onState("local-only", "本文の整合性が取れないため保存できません。");
+      this.callbacks.onState("local-only", t("本文の整合性が取れないため保存できません。"));
       return;
     }
-    this.callbacks.onState("offline", "端末に保存済み・未同期");
+    this.callbacks.onState("offline", t("端末に保存済み・未同期"));
     this.scheduleRetry();
   }
 
@@ -459,7 +460,7 @@ export class SyncEngine {
       return;
     }
 
-    this.callbacks.onState("conflict", "競合があります。");
+    this.callbacks.onState("conflict", t("競合があります。"));
     const decision = await this.callbacks.onConflict({
       local,
       remote: remoteDocument,
@@ -569,7 +570,7 @@ export class SyncEngine {
       this.callbacks.applyRemote(remoteDocument, { fromAdoption: false });
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 401) {
-        this.callbacks.onState("auth-expired", "再ログインが必要です。");
+        this.callbacks.onState("auth-expired", t("再ログインが必要です。"));
         return;
       }
       // Network hiccups keep the polling cadence; no tight retry loop.

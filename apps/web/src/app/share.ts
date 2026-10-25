@@ -6,7 +6,11 @@
  * payload (spec §6.5). Dependencies are injected so every branch is testable.
  */
 
-export const SHARE_TEXT = "メールアドレスなしで、1枚のテキストを。パスキーで開いて、端末で暗号化されるメモです。";
+import { t } from "./i18n.ts";
+
+export const SHARE_TEXT = t(
+  "メールアドレスなしで、1枚のテキストを。パスキーで開いて、端末で暗号化されるメモです。",
+);
 
 export type ShareOutcome = "shared" | "cancelled" | "copied";
 

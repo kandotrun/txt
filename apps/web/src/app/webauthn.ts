@@ -11,6 +11,7 @@
  */
 
 import { PRF_INPUT_V1 } from "../../../../packages/protocol/src/crypto.ts";
+import { t } from "./i18n.ts";
 import { fromBase64Url, toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import type {
   PublicKeyCredentialCreationOptionsJSON,
@@ -123,14 +124,14 @@ function credentialToDto(credential: PublicKeyCredential): Record<string, unknow
 function classifyError(error: unknown): WebAuthnError {
   if (error instanceof DOMException) {
     if (error.name === "NotAllowedError") {
-      return new WebAuthnError("cancelled", "パスキーの操作が取り消されました。");
+      return new WebAuthnError("cancelled", t("パスキーの操作が取り消されました。"));
     }
     if (error.name === "NotSupportedError") {
-      return new WebAuthnError("unsupported", "この環境ではパスキーを利用できません。");
+      return new WebAuthnError("unsupported", t("この環境ではパスキーを利用できません。"));
     }
   }
   if (error instanceof WebAuthnError) return error;
-  return new WebAuthnError("failed", (error as Error).message ?? "パスキーの操作に失敗しました。");
+  return new WebAuthnError("failed", (error as Error).message ?? t("パスキーの操作に失敗しました。"));
 }
 
 export interface PrfResult {
@@ -160,7 +161,7 @@ export async function createCredential(
   } catch (error) {
     throw classifyError(error);
   }
-  if (!credential) throw new WebAuthnError("cancelled", "パスキーの作成が完了しませんでした。");
+  if (!credential) throw new WebAuthnError("cancelled", t("パスキーの作成が完了しませんでした。"));
 
   let prfOutput = readPrfOutput(credential);
   if (!prfOutput) {
@@ -179,7 +180,7 @@ export async function createCredential(
     if (!prfOutput) {
       throw new WebAuthnError(
         "no-prf",
-        "この環境では、このパスキーで暗号化された内容を開けません。",
+        t("この環境では、このパスキーで暗号化された内容を開けません。"),
       );
     }
   }
@@ -212,7 +213,7 @@ export async function assertCredential(
   } catch (error) {
     throw classifyError(error);
   }
-  if (!credential) throw new WebAuthnError("cancelled", "パスキーの操作が完了しませんでした。");
+  if (!credential) throw new WebAuthnError("cancelled", t("パスキーの操作が完了しませんでした。"));
   void flags;
   return {
     prfOutput: readPrfOutput(credential),

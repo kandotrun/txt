@@ -28,6 +28,7 @@ import { history, redo, undo } from "prosemirror-history";
 import { newId, SCHEMA_VERSION } from "../../../../packages/protocol/src/document.ts";
 import type { Block, DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { insertMediaAtCaret, insertMediaBlock } from "./document-blocks.ts";
+import { t } from "./i18n.ts";
 
 export const MEDIA_NODE = "media";
 
@@ -505,7 +506,7 @@ function buildPlaceholder(mediaId: string): HTMLElement {
   const element = document.createElement("div");
   element.className = "txt-media txt-media-placeholder";
   element.setAttribute("data-media-id", mediaId);
-  element.textContent = "読み込み中のメディア";
+  element.textContent = t("読み込み中のメディア");
   return element;
 }
 
