@@ -69,6 +69,19 @@ for (const name of [
   await fs.copyFile(path.join(root, "static", name), path.join(dist, name));
 }
 
+// AI-agent connection guides (spec §17.4). The canonical sources live in
+// skills/txt-agent/ and are copied at build time so the served files can
+// never drift from the repo copies. Real files in dist are served as-is
+// by the ASSETS binding — they are not replaced by the SPA shell.
+const repoRoot = path.join(root, "..", "..");
+for (const [from, to] of [
+  ["skills/txt-agent/SKILL.md", "agents.md"],
+  ["skills/txt-agent/SKILL.ja.md", "agents.ja.md"],
+  ["skills/txt-agent/llms.txt", "llms.txt"],
+]) {
+  await fs.copyFile(path.join(repoRoot, from), path.join(dist, to));
+}
+
 // index.html references the hashed app bundle and the crypto worker URL.
 const html = await fs.readFile(path.join(dist, "index.html"), "utf8");
 const replaced = html

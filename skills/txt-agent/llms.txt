@@ -1,0 +1,22 @@
+# txt
+
+> txt is a passkey-only, end-to-end encrypted single-sheet memo at
+> https://txt.2-38.com. No email address, no password: one sheet of text
+> (with encrypted photo, video and audio attachments), opened with a
+> passkey and encrypted on the user's device, so the server only ever
+> stores ciphertext.
+
+## AI agents
+
+txt can be connected to the user's own AI agent through a local MCP
+server that decrypts only on the user's machine. If you are an AI agent
+asked to connect to txt, follow the guide — it covers the parts only
+the human can do, the agent-side setup, and the safe-writing rules:
+
+- [Agent connection guide (English)](https://txt.2-38.com/agents.md)
+- [エージェント接続手順（日本語）](https://txt.2-38.com/agents.ja.md)
+
+## Links
+
+- [txt](https://txt.2-38.com/)
+- [Source code](https://github.com/kandotrun/txt)
