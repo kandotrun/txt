@@ -26,16 +26,20 @@
     "dev:build": "npm run build:web && wrangler dev --config config/wrangler.dev.jsonc --port 8799 --persist-to .wrangler/dev-state"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "^4.20250919.0",
+    "@cloudflare/vitest-plugin": "^1.4.7",
+    "@cloudflare/workers-types": "^5.20261022.1",
     "@playwright/test": "^1.63.0",
-    "@types/node": "^22.20.4",
+    "@types/node": "^26.6.5",
     "esbuild": "^0.28.2",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.12",
+    "typescript": "^7.0.2",
+    "typescript5": "npm:typescript@^5.9.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
     "wrangler": "^4.135.0"
   },
   "overrides": {
-    "zod": "^4.6.7"
+    "zod": "^4.6.7",
+    "undici": "^7.30.1",
+    "sharp": "^0.35.5"
   }
 }
