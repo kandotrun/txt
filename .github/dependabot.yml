@@ -1,0 +1,21 @@
+# Dependabot version updates for the npm workspaces (root lockfile covers
+# packages/* and apps/*). Updates are grouped so routine bumps arrive as a
+# couple of weekly PRs instead of one PR per package. Security updates use
+# these groups too.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Tokyo"
+    labels:
+      - "dependencies"
+      - "javascript"
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+      development-dependencies:
+        dependency-type: "development"
