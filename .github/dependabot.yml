@@ -15,7 +15,16 @@ updates:
       - "dependencies"
       - "javascript"
     groups:
+      # Major-version upgrades are deliberately excluded: they are reviewed
+      # separately (see the 2026-10-25 dependency review), not auto-proposed.
+      # Security updates are unaffected by this restriction.
       production-dependencies:
         dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
       development-dependencies:
         dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
