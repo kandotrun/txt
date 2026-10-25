@@ -1,89 +1,148 @@
-# txt
+**English** · [日本語](./README.ja.md)
 
-`https://txt.2-38.com/` — メールアドレスなしで、パスキーで暗号化された1枚のテキストを読み書きできるアプリ。
+<p align="center">
+  <img src="./apps/web/static/og.png" width="640" alt="txt — One sheet of text, no email address.">
+</p>
 
-仕様は [`spec.md`](./spec.md) が実装基準です（仕様版 1.3、Web-only）。このリポジトリは **Webとサーバー（Worker）のみ** を実装します。デスクトップ・スマートフォンのブラウザーから利用でき、ネイティブアプリの導入は不要です。開発ルールは [`AGENTS.md`](./AGENTS.md) を参照してください。
+<h1 align="center">txt</h1>
 
-## 構成
+<p align="center">
+  One sheet of text, no email address. Opened with a passkey, encrypted on your device.
+</p>
 
-| 領域 | 実装 |
+<p align="center">
+  <a href="https://txt.2-38.com"><img src="https://img.shields.io/badge/website-txt.2--38.com-black" alt="Website"></a>
+  <img src="https://img.shields.io/badge/spec-1.4-blue" alt="Spec 1.4">
+  <img src="https://img.shields.io/badge/auth-passkey%20only-green" alt="Passkey only">
+  <img src="https://img.shields.io/badge/encryption-E2EE-brightgreen" alt="E2EE">
+</p>
+
+**txt** is a single-sheet memo at [txt.2-38.com](https://txt.2-38.com). There are no titles and no lists — open it and write. Text and attachments (photos, videos, audio) are encrypted in your browser before anything leaves the device, so the server only ever stores ciphertext.
+
+The implementation standard is [`spec.md`](./spec.md) (spec version 1.4, Web-only). This repository implements **the Web app and the server (Worker) only** — it works in desktop and mobile browsers, with no native app to install. Development rules live in [`AGENTS.md`](./AGENTS.md).
+
+## ✨ Features
+
+- 📄 **One sheet** — a single document per account, saved and synced automatically; no titles, folders, or lists to manage
+- 🔑 **Passkey only** — no email address, phone number, or password; sign in with a discoverable passkey (fingerprint, face, or device unlock)
+- 🔐 **End-to-end encrypted** — a passkey PRF output derives a key-encryption key that wraps a random VaultKey; the server never receives plaintext, file names, MIME types, PRF output, or keys
+- 🖼️ **Encrypted attachments** — photos, videos, and audio are encrypted per-file in chunks and streamed back with Range support
+- 🌐 **Japanese / English UI** — the interface follows your browser language on first run and can be switched any time from the **More** menu; your choice is kept on the device
+- 🤖 **AI agent connection** — your own AI agent can read and write the sheet through a local MCP server, without weakening the encryption (see below)
+- 📱 **Responsive** — desktop and mobile browsers, including Apple-device WebAuthn/PRF and an encrypted-media Service Worker
+
+## 🔐 How the encryption works
+
+| Layer | What happens |
 | --- | --- |
-| ホスト / WebAuthn RP ID | `txt.2-38.com` |
-| サーバー | Cloudflare Workers + Hono |
-| データ | D1（認証情報・暗号文・同期状態）、非公開 R2（暗号化添付） |
-| ログイン | メール・電話・パスワードを要求しない発見可能なパスキー |
-| 暗号化 | PRF 由来の KEK で包んだ VaultKey によるクライアント側 E2EE |
-| Web | HTML/CSS/JavaScript + 最小限の ProseMirror |
-| 保存・同期 | 条件付き HTTP 更新（ETag）/ 短周期ポーリング / BroadcastChannel 補助 |
+| Passkey (WebAuthn + PRF) | The PRF output never leaves the device |
+| Key encryption key (KEK) | Derived from the PRF output with HKDF |
+| VaultKey | A random 32-byte key, stored on the server only wrapped by the KEK |
+| Document & media | Encrypted client-side (AES-GCM); the server stores ciphertext in D1 / private R2 |
+| Recovery key | A `TXT1.`-format key shown once at registration — the only way back if every passkey is lost |
+
+Sessions are Cookie-only. Saves use ETag compare-and-swap with mutation IDs, so two devices never silently overwrite each other — a conflict is surfaced and decided by you.
+
+> [!NOTE]
+> The server cannot verify plaintext. All content validation happens on the client, and the server is written to not trust it.
+
+## 🤖 AI agent connection
+
+You can let **your own AI agent** (for example Muse) work with your sheet:
+
+- 🔒 **E2EE is preserved** — decryption happens only inside a small MCP server running on your own machine, in memory. The server side still sees ciphertext only.
+- 🧑 **You stay in control** — adding an agent requires your passkey, a pairing code (10-minute expiry), a fingerprint comparison, and your choice of token scope (read-only, or read & write). Tokens expire after 30 days, and you can revoke an agent at any time from **More → Agents**.
+- ✍️ **Writes are conservative** — appending is the default; replacements and rollback are approval-gated, and on a conflict the agent must show you the diff instead of merging or overwriting.
+
+**Hand the guide to your agent:** the connection procedure is written for AI agents and served at stable URLs —
+
+| Language | Guide |
+| --- | --- |
+| English | https://txt.2-38.com/agents.md |
+| 日本語 | https://txt.2-38.com/agents.ja.md |
+
+Canonical sources: [`skills/txt-agent/`](./skills/txt-agent/) (also the source of [`/llms.txt`](https://txt.2-38.com/llms.txt)). Implementation details: [`apps/agent-mcp/README.md`](./apps/agent-mcp/README.md).
+
+## 🧱 Architecture
+
+| Area | Implementation |
+| --- | --- |
+| Host / WebAuthn RP ID | `txt.2-38.com` |
+| Server | Cloudflare Workers + Hono |
+| Data | D1 (credentials, ciphertext, sync state), private R2 (encrypted attachments) |
+| Sign-in | Discoverable passkeys — no email, phone, or password |
+| Encryption | Client-side E2EE: VaultKey wrapped by a PRF-derived KEK |
+| Web | HTML/CSS/JavaScript + a minimal ProseMirror set |
+| Save & sync | Conditional HTTP updates (ETag) / short-interval polling / BroadcastChannel assist |
 
 ```
 apps/
-  web/          # エディター、WebAuthn/PRF、暗号ワーカー、メディア Service Worker、同期
-  worker/       # Hono ルーティング、認証、D1、R2、清掃、セキュリティヘッダ
+  web/          # editor, WebAuthn/PRF, crypto worker, media Service Worker, sync
+  worker/       # Hono routing, auth, D1, R2, cleanup, security headers
+  agent-mcp/    # local MCP server that bridges AI agents to the sheet (decrypts on-device)
 packages/
-  protocol/     # Encode、HKDF/AES-GCM 契約、鍵導出、共通文書モデル、テストベクトル
-migrations/     # D1 スキーマ
+  protocol/     # encoding, HKDF/AES-GCM contract, key derivation, document model, test vectors
+migrations/     # D1 schema
+skills/         # agent-facing skill documents (txt-agent connection guide, llms.txt)
 tests/
-  protocol/     # 暗号契約の既知入力/期待出力
-  editor/       # 文書モデルとメディア挿入の規則
-  worker/       # Worker 統合テスト（実際の D1/R2 バインディング）
-  e2e/          # 実ブラウザー E2E（CDP 仮想認証器 + PRF）
-config/         # ローカル開発用 wrangler 設定
-scripts/        # dev サーバー起動、本番スモーク
+  protocol/     # crypto contract known-answer tests
+  editor/       # document model and media insertion rules
+  worker/       # Worker integration tests (real D1/R2 bindings)
+  e2e/          # real-browser E2E (CDP virtual authenticators + PRF)
+config/         # wrangler config for local development
+scripts/        # dev server launcher, production smoke test
 ```
 
-## セットアップ
+## 🚀 Development
 
 ```bash
 npm ci
 
-# ローカル開発（ビルド → D1 マイグレーション → wrangler dev）
+# Local development (build -> D1 migrations -> wrangler dev)
 npm run dev            # http://localhost:8799
 
-# 検証
-npm run check          # typecheck + protocol/editor/Web/security テスト + Worker テスト
-npm run build          # Webをビルド
-npm run test:e2e       # 実ブラウザー E2E（dev サーバーが動いていること）
+# Verification
+npm run check          # typecheck + protocol/editor/web/security tests + Worker tests
+npm run build          # build the Web app
+npm run test:e2e       # real-browser E2E (needs the dev server running)
 
-# 本番
+# Production
 npm run deploy
 bash scripts/smoke-prod.sh
 ```
 
-`npm run dev` がビルドとサーバー起動をまとめて行うのは、`wrangler dev` がアセットマニフェストを起動時に固定するためです。ビルドだけを先に走らせてサーバーを再起動すると、ハッシュ付きファイル名の不整合（`/` が 500）を避けられます。
+> [!TIP]
+> `npm run dev` builds and starts the server together on purpose: `wrangler dev` fixes its asset manifest at startup, so building first and restarting avoids hashed-filename mismatches (a `500` on `/`).
 
-## 実装済みの範囲（spec §16 のフェーズ1〜3に相当）
+## ✅ Implemented, and the honest limits
 
-- **先行検証**: 日本語IME（composition 状態機械）、メディア、Undo、PRF/暗号形式、チャンク暗号文の Range 配信
-- **Web基礎**: 登録・復旧・セッション、暗号化本文、共通モデル、CAS、暗号化退避（IndexedDB）
-- **Web完成**: 添付、競合、清掃、セキュリティ、公開設定
-- **ブラウザー対応**: モバイルのレスポンシブUI、Apple端末のWebAuthn/PRF、暗号化メディアService Worker、Apple-touch iconを維持。対応状況はブラウザー・OS・パスキー保存先の組で確認する
-- **オンボーディングと外観（spec §4.1/§4.2/§4.6, 仕様版1.2）**: 「はじめて使う」からの4枚の紹介、登録直後の一度だけの案内、空欄の案内、「活字」基調の外観、広い画面での中央の本文列（最大720px）、編集面を動かさないアニメーションと `prefers-reduced-motion` 対応
-- **シェアと検索（spec §4.6/§14）**: OGP・`summary_large_image` のシェアカード（`npm run brand:images` で画像を生成）、検索掲載の許可と `robots.txt`、「その他」→「txt を紹介する」（アプリのURLだけを共有）
+Implemented (spec §16 phases 1–3, plus agent access and i18n in 1.4):
 
-### 動作を確認できる範囲
+- **Groundwork verified first**: Japanese IME composition state machine, media, Undo, PRF/crypto formats, chunked-ciphertext Range delivery
+- **Web foundation**: registration, recovery, sessions, encrypted documents, the shared document model, CAS, encrypted drafts (IndexedDB)
+- **Web complete**: attachments, conflicts, cleanup, security, public surface
+- **Browsers**: responsive mobile UI, Apple-device WebAuthn/PRF, encrypted-media Service Worker, Apple touch icon
+- **Onboarding & look**: a four-slide intro from "Get started", one-time hints after registration, an empty-state hint, the "type" visual basis, a centered 720px column on wide screens, animation that never moves the editing surface, `prefers-reduced-motion` support
+- **Sharing & search**: OGP / `summary_large_image` share cards (generated with `npm run brand:images`), search indexing allowed with `robots.txt`, and **More → Share txt** (shares the app URL only, never the sheet)
+- **AI agent access**: per-agent key wrap (P-256 ECDH), scoped 30-day tokens, append-first writes with approval-gated replace/rollback (design: [`docs/agent-access-design.md`](./docs/agent-access-design.md))
+- **i18n**: Japanese/English UI with browser-language detection and a manual switch (spec §4.7)
 
-- パスキー登録（residentKey required / UV required / attestation none）+ PRF 実出力
-- VaultKey のラップ/解除、復旧キー（`TXT1.` 形式）の生成・検証
-- 暗号化文書の ETag 条件付き保存、同一 mutationId の冪等再送、412/409/422 の区別
-- チャンク単位の暗号化添付、`Range`/`HEAD`/`206`/`416` の配信、参照中のみ配信
-- IME composition 中は確定済みスナップショットのみ同期
-- 未参照メディアの 24 時間猶予後の清掃、未完了 multipart の清掃
+Verified behaviour includes: passkey registration (residentKey required / UV required / attestation none) with real PRF output, VaultKey wrap/unwrap, recovery-key generation and verification, ETag-conditional document saves with idempotent mutation-ID retries and distinct 412/409/422 handling, chunk-encrypted attachments with `Range`/`HEAD`/`206`/`416` delivery while referenced, syncing only confirmed snapshots during IME composition, and cleanup of unreferenced media after a 24-hour grace period.
 
-## 未実装・未検証（正直な範囲）
+Not yet done — stated plainly:
 
-- **実IMEでの手動試験（§17.1/§17.2）**: 自動テストは composition イベント順序と状態機械を検証していますが、macOS/Windows/iOS の実IME、フリック入力、ライブ変換は実機で未確認です。
-- **512MiB 動画の実機シーク（§17.5）**: チャンク暗号化と Range 配信は検証済みですが、大容量実ファイルでの実機再生は未実施です。
-- **独立したセキュリティレビュー（§6.3）**: 未実施。暗号コンテナーはアプリ固有の設計であり、監査済み標準形式ではありません。
-- **本番アカウントでの手動パスキー試験**: 自動E2Eは Chromium の仮想認証器で検証しています。実パスキー（1Password / Apple パスワード等）での相互運用は未確認です。
+- **Manual testing with real IMEs (§17.1/§17.2)**: automated tests cover composition event ordering and the state machine, but real macOS/Windows/iOS IMEs, flick input, and live conversion are unverified on hardware.
+- **512 MiB video seeking on hardware (§17.5)**: chunk encryption and Range delivery are verified; real large-file playback on devices is not.
+- **Independent security review (§6.3)**: not done. The crypto container is an application-specific design, not an audited standard format.
+- **Manual passkey testing on production accounts**: automated E2E uses Chromium virtual authenticators; interoperability with real passkeys (1Password, Apple Passwords, …) is unverified.
 
-## セキュリティ上の注意
+## ⚠️ Security notes
 
-- サーバーは平文本文・ファイル名・MIME・PRF 出力・VaultKey・fileKey を受け取りません。
-- `toJSON()` は送信に使いません（PRF results の漏洩防止）。署名検証に必要なフィールドだけの DTO を組み立てます。
-- 平文や鍵を `localStorage` / `sessionStorage` に置きません（IndexedDB には暗号化済みドラフトのみ）。
-- API・暗号文・復号後の応答は `private, no-store`。ハッシュ付き静的資産のみ長期キャッシュします。
+- The server never receives plaintext, file names, MIME types, PRF output, VaultKey, or fileKeys.
+- `toJSON()` output is never sent as-is (it would leak PRF results); DTOs are assembled field by field for signature verification only.
+- No plaintext or keys in `localStorage` / `sessionStorage` (IndexedDB holds encrypted drafts only; the UI-language choice is the one non-content preference kept in `localStorage`).
+- API, ciphertext, and decrypted responses are `private, no-store`; only hashed static assets are cached long-term.
 
-## ライセンス
+## 📄 License
 
-未定（個人プロジェクト）。
+Undecided (personal project).
