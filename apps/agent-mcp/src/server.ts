@@ -262,10 +262,6 @@ export async function serveHttp(state: AgentState): Promise<void> {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error("TXT_AGENT_MCP_PORT must be a valid port");
   }
-  const server = buildServer(state);
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  await server.connect(transport);
-
   const httpServer = createServer(async (request: IncomingMessage, response: ServerResponse) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     if (url.pathname === "/healthz") {
@@ -296,7 +292,17 @@ export async function serveHttp(state: AgentState): Promise<void> {
         return;
       }
     }
+    // Stateless mode: a fresh server + transport per request. A single
+    // shared instance only answers the first initialize and then fails
+    // every subsequent request with 500 (found in the 2026-10-25
+    // production enrollment session).
+    const server = buildServer(state);
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    response.on("close", () => {
+      void server.close().catch(() => {});
+    });
     try {
+      await server.connect(transport);
       await transport.handleRequest(request, response, body);
     } catch (error) {
       if (error instanceof AgentApiError) throw error;
