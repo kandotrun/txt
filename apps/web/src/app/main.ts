@@ -42,6 +42,7 @@ import {
 } from "./vault.ts";
 import type { UnlockedVault } from "./vault.ts";
 import { WebAuthnError, assertCredential } from "./webauthn.ts";
+import { applyStaticLocale, getLocale, localeTag, setLocale, t } from "./i18n.ts";
 
 /* ------------------------------------------------------------------ */
 /* Element handles                                                     */
@@ -161,10 +162,10 @@ function showGate(options: {
   elements.gate.inert = false;
   elements.gate.hidden = false;
   elements.app.hidden = true;
-  elements.gateTitle.textContent = options.title ?? "メールアドレスなしで、1枚のテキストを。";
+  elements.gateTitle.textContent = options.title ?? t("メールアドレスなしで、1枚のテキストを。");
   elements.gateBody.textContent =
     options.body ??
-    "パスキーで暗号化された、あなた専用の1枚です。本文と添付は端末で暗号化され、サーバーには暗号文だけが保存されます。";
+    t("パスキーで暗号化された、あなた専用の1枚です。本文と添付は端末で暗号化され、サーバーには暗号文だけが保存されます。");
   elements.gateActions.replaceChildren(
     ...options.actions.map((action) => {
       const button = document.createElement("button");
@@ -489,7 +490,7 @@ async function materializeImage(
   }
   const placeholder = document.createElement("div");
   placeholder.className = "txt-media-placeholder";
-  placeholder.textContent = "この画像を表示できません。";
+  placeholder.textContent = t("この画像を表示できません。");
   if (img.isConnected) img.replaceWith(placeholder);
 }
 
@@ -545,7 +546,7 @@ async function attachFiles(files: File[], position: number): Promise<void> {
       controller.signal.throwIfAborted();
       if (generation !== state.sessionGeneration || !state.editor) return;
       if (mediaInfo(result.mediaId) !== result.info) {
-        throw new Error("文書が更新されました。添付をやり直してください。");
+        throw new Error(t("文書が更新されました。添付をやり直してください。"));
       }
       // Insertion happens here (the upload completed); when composing, the
       // editor defers the structural change to the next safe point internally.
@@ -564,7 +565,7 @@ async function attachFiles(files: File[], position: number): Promise<void> {
       state.attaching.delete(placeholderId);
       renderAttachProgress();
       if ((error as Error).name !== "AbortError") {
-        toast(`添付に失敗しました: ${(error as Error).message}`);
+        toast(t("添付に失敗しました: {message}", { message: (error as Error).message }));
       }
     }
   }
@@ -588,7 +589,7 @@ function renderAttachProgress(): void {
     progress.value = entry.progress;
     const cancel = document.createElement("button");
     cancel.type = "button";
-    cancel.textContent = "取消";
+    cancel.textContent = t("取消");
     cancel.addEventListener("click", () => {
       entry.controller.abort();
       state.attaching.delete(id);
@@ -608,13 +609,13 @@ function renderAttachProgress(): void {
 function setSyncState(next: SyncState, detail?: string): void {
   const labels: Record<SyncState, string> = {
     idle: "",
-    saving: "保存中",
-    saved: "同期済み",
-    "local-only": "端末に保存済み・未同期",
-    offline: "端末に保存済み・未同期",
-    conflict: "競合を確認してください",
-    "auth-expired": "再ログインが必要です",
-    "decrypt-failed": "内容を開けません。データは変更していません。",
+    saving: t("保存中"),
+    saved: t("同期済み"),
+    "local-only": t("端末に保存済み・未同期"),
+    offline: t("端末に保存済み・未同期"),
+    conflict: t("競合を確認してください"),
+    "auth-expired": t("再ログインが必要です"),
+    "decrypt-failed": t("内容を開けません。データは変更していません。"),
   };
   elements.syncStatus.textContent = detail ?? labels[next];
   elements.syncStatus.dataset.state = next;
@@ -639,7 +640,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   mediaReady = Promise.resolve(false);
 
   try {
-    setSyncState("saving", "読み込み中");
+    setSyncState("saving", t("読み込み中"));
     const session = await api.session();
     if (generation !== state.sessionGeneration) return;
     const bridge = new CryptoBridge(cryptoWorkerUrl());
@@ -650,7 +651,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     // 304 from a stale validator would leave us without a payload to decrypt.
     const first = await api.document();
     if (generation !== state.sessionGeneration) { bridge.lock(); return; }
-    if (!first.data) throw new Error("文書を取得できません。");
+    if (!first.data) throw new Error(t("文書を取得できません。"));
     state.documentId = first.data.documentId;
     if (window.__txtDebug) window.__txtDebug.step = "session:document-done";
 
@@ -786,16 +787,16 @@ async function startSession(vault: UnlockedVault): Promise<void> {
         remotePreview.textContent = serializeDocument(remote);
         const body = window.document.createElement("div");
         const localLabel = window.document.createElement("p");
-        localLabel.textContent = "この端末の内容";
+        localLabel.textContent = t("この端末の内容");
         const remoteLabel = window.document.createElement("p");
-        remoteLabel.textContent = "サーバーの内容";
+        remoteLabel.textContent = t("サーバーの内容");
         body.append(localLabel, localPreview, remoteLabel, remotePreview);
         const decision = await showDialog({
-          title: "競合しています",
+          title: t("競合しています"),
           body,
           actions: [
-            { label: "編集して保存", value: "keep-local", primary: true },
-            { label: "サーバーの内容を使う", value: "use-remote", primary: false },
+            { label: t("編集して保存"), value: "keep-local", primary: true },
+            { label: t("サーバーの内容を使う"), value: "use-remote", primary: false },
           ],
         });
         void remoteEtag;
@@ -820,7 +821,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   // client — including ones that do not implement the repair — sees a clean
   // document; otherwise the stored copy stays broken forever.
   if (bridge.lastDroppedMediaIds.length > 0) {
-    toast("添付情報の整合性を修復しました。", 4000);
+    toast(t("添付情報の整合性を修復しました。"), 4000);
     sync.noteCommittedChange();
   }
 
@@ -836,11 +837,11 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   if (generation !== state.sessionGeneration) return;
   if (draft && draft.mutationId) {
     const decision = await showDialog({
-      title: draft.provisional ? "未確定の入力が残っています" : "未同期の入力が残っています",
-      body: "前回の続きがあります。採用しますか。",
+      title: draft.provisional ? t("未確定の入力が残っています") : t("未同期の入力が残っています"),
+      body: t("前回の続きがあります。採用しますか。"),
       actions: [
-        { label: "採用する", value: "accept", primary: true },
-        { label: "破棄する", value: "discard", primary: false },
+        { label: t("採用する"), value: "accept", primary: true },
+        { label: t("破棄する"), value: "discard", primary: false },
       ],
     });
     if (generation !== state.sessionGeneration) return;
@@ -873,7 +874,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
           sync.noteCommittedChange();
         }
       } catch {
-        toast("保存済みの下書きを読み込めませんでした。");
+        toast(t("保存済みの下書きを読み込めませんでした。"));
       }
     } else if (decision === "discard") {
       await clearDraft({
@@ -891,13 +892,13 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     if (generation !== state.sessionGeneration) return;
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
-    setSyncState("decrypt-failed", "内容を開けません。データは変更していません。");
+    setSyncState("decrypt-failed", t("内容を開けません。データは変更していません。"));
     showGate({
-      title: "開けませんでした",
-      body: `${(error as Error).message}。データは変更していません。`,
+      title: t("開けませんでした"),
+      body: t("{message}。データは変更していません。", { message: (error as Error).message }),
       actions: [
-        { label: "もう一度試す", onClick: () => void unlockFlow() },
-        { label: "復旧キーで開く", primary: false, onClick: () => {
+        { label: t("もう一度試す"), onClick: () => void unlockFlow() },
+        { label: t("復旧キーで開く"), primary: false, onClick: () => {
           elements.gateDetails.hidden = false;
           elements.gateDetails.open = true;
         } },
@@ -997,11 +998,11 @@ function lockVault(reason: string): void {
   state.editor?.replaceDocument({ schemaVersion: 1, blocks: [{ id: crypto.randomUUID(), type: "text", text: "" }], media: {} });
   void accountId;
   showGate({
-    title: "パスキーで開く",
+    title: t("パスキーで開く"),
     body: reason,
     actions: [
-      { label: "パスキーで開く", onClick: () => void unlockFlow() },
-      { label: "復旧キーで開く", primary: false, onClick: () => {
+      { label: t("パスキーで開く"), onClick: () => void unlockFlow() },
+      { label: t("復旧キーで開く"), primary: false, onClick: () => {
         elements.gateDetails.hidden = false;
         elements.gateDetails.open = true;
       } },
@@ -1020,8 +1021,8 @@ function lockVaultForget(): void {
   if (accountId) {
     void forgetKeptVaultKey(accountId).catch(() => undefined);
   }
-  lockVault("ロックしました。");
-  toast("ロックしました。次回はパスキーが必要です。");
+  lockVault(t("ロックしました。"));
+  toast(t("ロックしました。次回はパスキーが必要です。"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -1029,7 +1030,7 @@ function lockVaultForget(): void {
 /* ------------------------------------------------------------------ */
 
 async function unlockFlow(): Promise<void> {
-  showGate({ body: "パスキーを確認しています……", actions: [] });
+  showGate({ body: t("パスキーを確認しています……"), actions: [] });
   try {
     const session = await api.session();
     let vault: UnlockedVault;
@@ -1045,7 +1046,7 @@ async function unlockFlow(): Promise<void> {
 }
 
 async function loginFlow(): Promise<void> {
-  showGate({ body: "パスキーを確認しています……", actions: [] });
+  showGate({ body: t("パスキーを確認しています……"), actions: [] });
   try {
     // Always a fresh discoverable-credential login, then unlock with the PRF.
     const vault = await loginAndUnlock();
@@ -1053,11 +1054,11 @@ async function loginFlow(): Promise<void> {
   } catch (error) {
     if (error instanceof WebAuthnError && error.kind === "no-prf") {
       showGate({
-        title: "この環境では、このパスキーで暗号化された内容を開けません。",
-        body: "別の対応パスキー、または復旧キーを使用してください。",
+        title: t("この環境では、このパスキーで暗号化された内容を開けません。"),
+        body: t("別の対応パスキー、または復旧キーを使用してください。"),
         actions: [
-          { label: "別のパスキーを試す", onClick: () => void loginFlow() },
-          { label: "復旧キーで開く", primary: false, onClick: () => {
+          { label: t("別のパスキーを試す"), onClick: () => void loginFlow() },
+          { label: t("復旧キーで開く"), primary: false, onClick: () => {
             elements.gateDetails.hidden = false;
             elements.gateDetails.open = true;
           } },
@@ -1071,7 +1072,7 @@ async function loginFlow(): Promise<void> {
 }
 
 async function registerFlow(): Promise<void> {
-  showGate({ body: "パスキーを作成しています……", actions: [] });
+  showGate({ body: t("パスキーを作成しています……"), actions: [] });
   try {
     if (window.__txtDebug) window.__txtDebug.step = "register:start";
     const result = await registerAccount();
@@ -1080,7 +1081,7 @@ async function registerFlow(): Promise<void> {
     const confirmed = await confirmRecoveryKey(result.recoveryKeyText);
     if (window.__txtDebug) window.__txtDebug.step = `register:confirmed:${String(confirmed)}`;
     if (!confirmed) {
-      toast("復旧キーの保存を確認できませんでした。設定から再度表示できます。");
+      toast(t("復旧キーの保存を確認できませんでした。設定から再度表示できます。"));
     }
     await startSession({
       vaultKey: result.vaultKey,
@@ -1090,8 +1091,8 @@ async function registerFlow(): Promise<void> {
     });
     // First edit: point at the two permanent controls once (spec §4.6 新規作成).
     dismissCoach = showCoachMarks(elements.coach, [
-      { side: "start", text: "写真・動画・音声を本文に入れる" },
-      { side: "end", text: "ロック・パスキー・復旧キー・使い方" },
+      { side: "start", text: t("写真・動画・音声を本文に入れる") },
+      { side: "end", text: t("ロック・パスキー・復旧キー・使い方") },
     ]);
   } catch (error) {
     reportAuthError(error);
@@ -1114,14 +1115,14 @@ async function startRegistration(): Promise<void> {
 function reportAuthError(error: unknown): void {
   const message =
     error instanceof ApiRequestError
-      ? `通信に失敗しました (${error.code}): ${error.message}`
-      : (error as Error).message || "操作を完了できませんでした。";
+      ? t("通信に失敗しました ({code}): {message}", { code: error.code, message: error.message })
+      : (error as Error).message || t("操作を完了できませんでした。");
   showGate({
-    title: "うまくいきませんでした",
+    title: t("うまくいきませんでした"),
     body: message,
     actions: [
-      { label: "もう一度試す", onClick: () => void loginFlow() },
-      { label: "はじめて使う", primary: false, onClick: () => void registerFlow() },
+      { label: t("もう一度試す"), onClick: () => void loginFlow() },
+      { label: t("はじめて使う"), primary: false, onClick: () => void registerFlow() },
     ],
     error: true,
     showRecovery: true,
@@ -1142,25 +1143,25 @@ async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "button secondary compact";
-  setToolButton(copy, "コピー", "copy");
+  setToolButton(copy, t("コピー"), "copy");
   copy.addEventListener("click", () => {
     void navigator.clipboard
       .writeText(recoveryKeyText)
-      .then(() => setToolButton(copy, "コピーしました", "check"))
+      .then(() => setToolButton(copy, t("コピーしました"), "check"))
       .catch(() => {
         // Clipboard unavailable: select the key so it can be copied by hand.
         window.getSelection()?.selectAllChildren(key);
-        setToolButton(copy, "選択しました", "check");
+        setToolButton(copy, t("選択しました"), "check");
       })
       .finally(() => {
-        window.setTimeout(() => setToolButton(copy, "コピー", "copy"), 2400);
+        window.setTimeout(() => setToolButton(copy, t("コピー"), "copy"), 2400);
       });
   });
 
   const save = document.createElement("button");
   save.type = "button";
   save.className = "button secondary compact";
-  setToolButton(save, "ファイルに保存", "download");
+  setToolButton(save, t("ファイルに保存"), "download");
   save.addEventListener("click", () => {
     downloadText("txt-recovery-key.txt", recoveryKeyText, body);
   });
@@ -1169,17 +1170,17 @@ async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
   tools.className = "recovery-tools";
   tools.append(copy, save);
   body.append(
-    textParagraph("パスキーを失くしたときに、この1枚を開ける唯一の鍵です。", "recovery-lead"),
+    textParagraph(t("パスキーを失くしたときに、この1枚を開ける唯一の鍵です。"), "recovery-lead"),
     key,
     tools,
     textParagraph(RECOVERY_HELP, "recovery-note"),
   );
   const decision = await showDialog({
-    title: "復旧キーを保存してください",
+    title: t("復旧キーを保存してください"),
     body,
     actions: [
-      { label: "保存しました", value: "confirm", primary: true },
-      { label: "あとで", value: "later", tone: "ghost" },
+      { label: t("保存しました"), value: "confirm", primary: true },
+      { label: t("あとで"), value: "later", tone: "ghost" },
     ],
   });
   return decision === "confirm";
@@ -1188,11 +1189,11 @@ async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
 async function recoveryFlow(): Promise<void> {
   const value = elements.recoveryInput.value.trim();
   if (!value) {
-    elements.gateFootnote.textContent = "復旧キーを入力してください。";
+    elements.gateFootnote.textContent = t("復旧キーを入力してください。");
     elements.gateFootnote.dataset.state = "error";
     return;
   }
-  elements.gateFootnote.textContent = "復旧しています……";
+  elements.gateFootnote.textContent = t("復旧しています……");
   elements.gateFootnote.dataset.state = "idle";
   try {
     const outcome = await (await import("./vault.ts")).recoverWithKey(value);
@@ -1203,7 +1204,7 @@ async function recoveryFlow(): Promise<void> {
       credentialId: "",
       keyVersion: 1,
     });
-    toast("復旧が完了しました。");
+    toast(t("復旧が完了しました。"));
   } catch (error) {
     elements.gateFootnote.textContent = (error as Error).message;
     elements.gateFootnote.dataset.state = "error";
@@ -1225,15 +1226,52 @@ async function performStepUp(): Promise<void> {
 /* Agent management (design §4.3, §7.1)                                */
 /* ------------------------------------------------------------------ */
 
+/** Absolute URL of the AI-agent connection guide for the current locale. */
+function agentGuideUrl(): string {
+  const page = getLocale() === "en" ? "agents.md" : "agents.ja.md";
+  return `${window.location.origin}/${page}`;
+}
+
+/**
+ * Guide hand-off block: the user gives this URL to their own AI agent so
+ * the agent can run the connection setup itself. Copying reuses the
+ * recovery-key copy pattern (button feedback, no clipboard side effects
+ * beyond the explicit click).
+ */
+function agentGuideBlock(): HTMLElement {
+  const block = document.createElement("div");
+  block.append(
+    textParagraph(
+      t("AIエージェントに接続作業を任せる場合は、この手順書のリンクをAIに渡してください。"),
+    ),
+    textParagraph(agentGuideUrl()),
+  );
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "button secondary compact";
+  setToolButton(copy, t("コピー"), "copy");
+  copy.addEventListener("click", () => {
+    void navigator.clipboard
+      .writeText(agentGuideUrl())
+      .then(() => setToolButton(copy, t("コピーしました"), "check"))
+      .catch(() => setToolButton(copy, t("選択しました"), "check"))
+      .finally(() => {
+        window.setTimeout(() => setToolButton(copy, t("コピー"), "copy"), 2400);
+      });
+  });
+  block.append(copy);
+  return block;
+}
+
 function agentStateLabel(agent: AgentSummary): string {
-  const name = agent.displayName || "名称未設定";
+  const name = agent.displayName || t("名称未設定");
   const state =
-    agent.state === "active" ? "有効" : agent.state === "pending" ? "登録途中" : "失効済み";
+    agent.state === "active" ? t("有効") : agent.state === "pending" ? t("登録途中") : t("失効済み");
   const token = agent.tokens.find((entry) => entry.revokedAt === null);
   const tokenNote = token
-    ? `トークン期限 ${new Date(token.expiresAt).toLocaleDateString("ja-JP")}`
-    : "トークンなし";
-  return `${name}（${state}、${tokenNote}）`;
+    ? t("トークン期限 {date}", { date: new Date(token.expiresAt).toLocaleDateString(localeTag()) })
+    : t("トークンなし");
+  return t("{name}（{state}、{tokenNote}）", { name, state, tokenNote });
 }
 
 /** Lists registered agents and offers add / revoke (design §7.1). */
@@ -1249,24 +1287,25 @@ async function manageAgents(): Promise<void> {
   const live = agents.filter((agent) => agent.state !== "revoked");
   const body = document.createElement("div");
   if (live.length === 0) {
-    body.append(textParagraph("登録済みのエージェントはありません。"));
+    body.append(textParagraph(t("登録済みのエージェントはありません。")));
   } else {
     for (const agent of live) body.append(textParagraph(agentStateLabel(agent)));
   }
   body.append(
-    textParagraph("エージェントはこの端末の外で復号します。本文がエージェント側へ渡る範囲を確認してから追加してください。"),
+    textParagraph(t("エージェントはこの端末の外で復号します。本文がエージェント側へ渡る範囲を確認してから追加してください。")),
+    agentGuideBlock(),
   );
   const decision = await showDialog({
-    title: "エージェント",
+    title: t("エージェント"),
     body,
     actions: [
-      { label: "エージェントを追加", value: "add" },
+      { label: t("エージェントを追加"), value: "add" },
       ...live.map((agent) => ({
-        label: `失効: ${agent.displayName || "名称未設定"}`,
+        label: t("失効: {name}", { name: agent.displayName || t("名称未設定") }),
         value: `revoke:${agent.agentId}`,
         tone: "danger" as const,
       })),
-      { label: "閉じる", value: "close", primary: false },
+      { label: t("閉じる"), value: "close", primary: false },
     ],
   });
   if (decision === "add") {
@@ -1277,18 +1316,18 @@ async function manageAgents(): Promise<void> {
     const agentId = decision.slice("revoke:".length);
     const target = live.find((agent) => agent.agentId === agentId);
     const confirmed = await showDialog({
-      title: "エージェントを失効しますか",
-      body: `${target?.displayName || "名称未設定"} の鍵ラップとトークンが無効になり、以後このエージェントは本文を取得できなくなります。`,
+      title: t("エージェントを失効しますか"),
+      body: t("{name} の鍵ラップとトークンが無効になり、以後このエージェントは本文を取得できなくなります。", { name: target?.displayName || t("名称未設定") }),
       actions: [
-        { label: "失効する", value: "confirm", tone: "danger" },
-        { label: "やめる", value: "cancel", primary: false },
+        { label: t("失効する"), value: "confirm", tone: "danger" },
+        { label: t("やめる"), value: "cancel", primary: false },
       ],
     });
     if (confirmed === "confirm") {
       try {
         await performStepUp();
         await api.revokeAgent(agentId);
-        toast("エージェントを失効しました。");
+        toast(t("エージェントを失効しました。"));
       } catch (error) {
         toast((error as Error).message);
       }
@@ -1314,16 +1353,17 @@ async function addAgentFlow(): Promise<void> {
     const body = document.createElement("div");
     body.append(
       textParagraph(
-        "MCPサーバー側で登録コマンドを実行し、このペアリングコードを入力してください。表示された公開鍵を下へ貼り付けると、この画面から登録を進められます（MCP側で公開鍵を送信済みの場合は空欄のまま進んでください）。",
+        t("MCPサーバー側で登録コマンドを実行し、このペアリングコードを入力してください。表示された公開鍵を下へ貼り付けると、この画面から登録を進められます（MCP側で公開鍵を送信済みの場合は空欄のまま進んでください）。"),
       ),
+      agentGuideBlock(),
     );
-    const codeParagraph = textParagraph(`ペアリングコード: ${enrollment.pairingCode}`);
+    const codeParagraph = textParagraph(t("ペアリングコード: {code}", { code: enrollment.pairingCode }));
     body.append(codeParagraph);
-    body.append(textParagraph(`登録ID: ${enrollment.agentId}`));
+    body.append(textParagraph(t("登録ID: {id}", { id: enrollment.agentId })));
     const nameLabel = document.createElement("label");
     nameLabel.className = "field";
     const nameSpan = document.createElement("span");
-    nameSpan.textContent = "表示名";
+    nameSpan.textContent = t("表示名");
     const nameInput = document.createElement("textarea");
     nameInput.rows = 1;
     nameInput.spellcheck = false;
@@ -1332,7 +1372,7 @@ async function addAgentFlow(): Promise<void> {
     const keyLabel = document.createElement("label");
     keyLabel.className = "field";
     const keySpan = document.createElement("span");
-    keySpan.textContent = "エージェントの公開鍵（任意）";
+    keySpan.textContent = t("エージェントの公開鍵（任意）");
     const keyInput = document.createElement("textarea");
     keyInput.rows = 3;
     keyInput.spellcheck = false;
@@ -1341,11 +1381,11 @@ async function addAgentFlow(): Promise<void> {
     body.append(nameLabel, keyLabel);
 
     const step = await showDialog({
-      title: "エージェントを追加",
+      title: t("エージェントを追加"),
       body,
       actions: [
-        { label: "進む", value: "next" },
-        { label: "やめる", value: "cancel", primary: false },
+        { label: t("進む"), value: "next" },
+        { label: t("やめる"), value: "cancel", primary: false },
       ],
     });
     if (step !== "next") return;
@@ -1360,21 +1400,21 @@ async function addAgentFlow(): Promise<void> {
     }
     const status = await api.agentEnrollment(enrollment.agentId);
     if (!status.publicKey) {
-      toast("公開鍵がまだ登録されていません。MCP側で登録してから、もう一度お試しください。");
+      toast(t("公開鍵がまだ登録されていません。MCP側で登録してから、もう一度お試しください。"));
       return;
     }
 
     const fingerprint = await agentFingerprintDisplay(status.publicKey);
     const match = await showDialog({
-      title: "フィンガープリントの確認",
-      body: `MCPサーバー側に表示されたフィンガープリントと一致しますか。\n${fingerprint}`,
+      title: t("フィンガープリントの確認"),
+      body: t("MCPサーバー側に表示されたフィンガープリントと一致しますか。\n{fingerprint}", { fingerprint }),
       actions: [
-        { label: "一致する", value: "yes" },
-        { label: "一致しない", value: "no", primary: false },
+        { label: t("一致する"), value: "yes" },
+        { label: t("一致しない"), value: "no", primary: false },
       ],
     });
     if (match !== "yes") {
-      toast("登録を中止しました。公開鍵を確認してください。");
+      toast(t("登録を中止しました。公開鍵を確認してください。"));
       return;
     }
 
@@ -1395,32 +1435,32 @@ async function addAgentFlow(): Promise<void> {
       active = current?.state === "active";
     }
     if (!active) {
-      toast("ラップを保存しました。MCP側で有効化を完了してから、トークンを発行してください。");
+      toast(t("ラップを保存しました。MCP側で有効化を完了してから、トークンを発行してください。"));
       return;
     }
 
     const scopeChoice = await showDialog({
-      title: "トークンの権限",
-      body: "読み取り専用トークンか、読み書きトークン（読み取りを含みます）を選んでください。書き込みはMCPサーバー側の安全策（追記優先・置換は承認制）の対象です。",
+      title: t("トークンの権限"),
+      body: t("読み取り専用トークンか、読み書きトークン（読み取りを含みます）を選んでください。書き込みはMCPサーバー側の安全策（追記優先・置換は承認制）の対象です。"),
       actions: [
-        { label: "読み取りのみ", value: "agent:read" },
-        { label: "読み書き", value: "agent:write", primary: false },
-        { label: "発行しない", value: "cancel", primary: false },
+        { label: t("読み取りのみ"), value: "agent:read" },
+        { label: t("読み書き"), value: "agent:write", primary: false },
+        { label: t("発行しない"), value: "cancel", primary: false },
       ],
     });
     if (scopeChoice !== "agent:read" && scopeChoice !== "agent:write") {
-      toast("ラップと有効化は完了しました。トークンはエージェント管理から後で発行できます。");
+      toast(t("ラップと有効化は完了しました。トークンはエージェント管理から後で発行できます。"));
       return;
     }
     const issued = await api.issueAgentToken(enrollment.agentId, scopeChoice);
     const tokenBody = document.createElement("div");
     tokenBody.append(
-      textParagraph("エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。"),
+      textParagraph(t("エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。")),
     );
     const tokenLabel = document.createElement("label");
     tokenLabel.className = "field";
     const tokenSpan = document.createElement("span");
-    tokenSpan.textContent = "トークン";
+    tokenSpan.textContent = t("トークン");
     const tokenInput = document.createElement("textarea");
     tokenInput.rows = 2;
     tokenInput.readOnly = true;
@@ -1428,9 +1468,9 @@ async function addAgentFlow(): Promise<void> {
     tokenLabel.append(tokenSpan, tokenInput);
     tokenBody.append(tokenLabel);
     await showDialog({
-      title: "トークンを発行しました",
+      title: t("トークンを発行しました"),
       body: tokenBody,
-      actions: [{ label: "閉じる", value: "close" }],
+      actions: [{ label: t("閉じる"), value: "close" }],
     });
   } catch (error) {
     toast((error as Error).message);
@@ -1444,26 +1484,27 @@ async function addAgentFlow(): Promise<void> {
 async function showMoreMenu(): Promise<void> {
   const accountId = state.unlocked?.accountId;
   const kept = accountId ? await loadKeptVaultKey(accountId).catch(() => null) : null;
-  const keepLabel = kept ? "この端末の保持を解除" : "この端末に保持（30日）";
+  const keepLabel = kept ? t("この端末の保持を解除") : t("この端末に保持（30日）");
   const decision = await showDialog({
-    title: "その他",
+    title: t("その他"),
     body: kept
-      ? `この端末ではパスキーなしで開けます（${new Date(kept.expiresAt).toLocaleDateString("ja-JP")} まで）。`
-      : "この1枚に関する操作です。",
+      ? t("この端末ではパスキーなしで開けます（{date} まで）。", { date: new Date(kept.expiresAt).toLocaleDateString(localeTag()) })
+      : t("この1枚に関する操作です。"),
     variant: "menu",
     actions: [
       { label: keepLabel, value: kept ? "forget-device" : "keep-device", icon: "device" },
-      { label: "今すぐロック", value: "lock-now", icon: "lock" },
-      { label: "パスキーを追加", value: "add-passkey", icon: "key" },
-      { label: "復旧キーを更新", value: "rotate-recovery", icon: "refresh" },
-      { label: "エージェント", value: "agents", icon: "device" },
-      { label: "使い方", value: "help", icon: "help" },
+      { label: t("今すぐロック"), value: "lock-now", icon: "lock" },
+      { label: t("パスキーを追加"), value: "add-passkey", icon: "key" },
+      { label: t("復旧キーを更新"), value: "rotate-recovery", icon: "refresh" },
+      { label: t("エージェント"), value: "agents", icon: "device" },
+      { label: t("使い方"), value: "help", icon: "help" },
+      { label: t("言語"), value: "language" },
       // Shares the app's URL only — never the sheet (spec §4.6).
-      { label: "txt を紹介する", value: "share", icon: "share" },
+      { label: t("txt を紹介する"), value: "share", icon: "share" },
       // Session and account actions sit apart; deletion is marked by tone and
       // icon, not by colour alone (spec §4.1, §4.6).
-      { label: "セッションを終了", value: "end-session", icon: "logout", separatorBefore: true },
-      { label: "アカウントを削除", value: "delete-account", icon: "trash", tone: "danger" },
+      { label: t("セッションを終了"), value: "end-session", icon: "logout", separatorBefore: true },
+      { label: t("アカウントを削除"), value: "delete-account", icon: "trash", tone: "danger" },
     ],
   });
   if (!state.unlocked) return;
@@ -1472,12 +1513,25 @@ async function showMoreMenu(): Promise<void> {
       await runIntro("replay", { behind: [elements.app] });
       state.editor?.focus();
       break;
+    case "language": {
+      const choice = await showDialog({
+        title: t("言語"),
+        body: t("表示言語を選んでください。"),
+        actions: [
+          { label: "日本語", value: "ja" },
+          { label: "English", value: "en", primary: false },
+          { label: t("閉じる"), value: "close", primary: false },
+        ],
+      });
+      if (choice === "ja" || choice === "en") setLocale(choice);
+      break;
+    }
     case "share":
       try {
         const outcome = await shareApp({ navigator, origin: window.location.origin });
-        if (outcome === "copied") toast("リンクをコピーしました。");
+        if (outcome === "copied") toast(t("リンクをコピーしました。"));
       } catch {
-        toast("共有できませんでした。アドレスバーのURLを共有してください。");
+        toast(t("共有できませんでした。アドレスバーのURLを共有してください。"));
       }
       break;
     case "keep-device": {
@@ -1490,17 +1544,17 @@ async function showMoreMenu(): Promise<void> {
           vaultKey: state.unlocked.vaultKey,
         });
         toast(
-          `この端末に保持しました（${new Date(expiresAt).toLocaleDateString("ja-JP")} まで）。`,
+          t("この端末に保持しました（{date} まで）。", { date: new Date(expiresAt).toLocaleDateString(localeTag()) }),
         );
       } catch (error) {
-        toast(`保持できませんでした: ${(error as Error).message}`);
+        toast(t("保持できませんでした: {message}", { message: (error as Error).message }));
       }
       break;
     }
     case "forget-device":
       try {
         await forgetKeptVaultKey(state.unlocked.accountId);
-        toast("この端末の保持を解除しました。次回はパスキーが必要です。");
+        toast(t("この端末の保持を解除しました。次回はパスキーが必要です。"));
       } catch (error) {
         toast((error as Error).message);
       }
@@ -1515,7 +1569,7 @@ async function showMoreMenu(): Promise<void> {
           accountId: state.unlocked.accountId,
           keyVersion: state.unlocked.keyVersion,
         });
-        toast("パスキーを追加しました。");
+        toast(t("パスキーを追加しました。"));
       } catch (error) {
         toast((error as Error).message);
       }
@@ -1551,11 +1605,11 @@ async function showMoreMenu(): Promise<void> {
       break;
     case "delete-account": {
       const confirmed = await showDialog({
-        title: "アカウントを削除しますか",
-        body: "本文・添付・鍵が削除され、元に戻せません。",
+        title: t("アカウントを削除しますか"),
+        body: t("本文・添付・鍵が削除され、元に戻せません。"),
         actions: [
-          { label: "削除する", value: "confirm", tone: "danger" },
-          { label: "やめる", value: "cancel", primary: false },
+          { label: t("削除する"), value: "confirm", tone: "danger" },
+          { label: t("やめる"), value: "cancel", primary: false },
         ],
       });
       if (confirmed === "confirm") {
@@ -1665,11 +1719,11 @@ async function boot(): Promise<void> {
     if (session.scope === "pending") {
       // A half-finished registration: offer to complete it.
       showGate({
-        title: "登録を完了してください",
-        body: "パスキーは作成済みですが、準備が完了していません。",
+        title: t("登録を完了してください"),
+        body: t("パスキーは作成済みですが、準備が完了していません。"),
         actions: [
-          { label: "続ける", onClick: () => void loginFlow() },
-          { label: "はじめて使う", primary: false, onClick: () => void registerFlow() },
+          { label: t("続ける"), onClick: () => void loginFlow() },
+          { label: t("はじめて使う"), primary: false, onClick: () => void registerFlow() },
         ],
         showRecovery: true,
       });
@@ -1677,11 +1731,11 @@ async function boot(): Promise<void> {
     }
     // A valid session without a device-kept key still needs an explicit unlock.
     showGate({
-      title: "パスキーで開く",
-      body: "暗号化された内容を開くため、パスキーを確認します。",
+      title: t("パスキーで開く"),
+      body: t("暗号化された内容を開くため、パスキーを確認します。"),
       actions: [
-        { label: "パスキーで開く", onClick: () => void unlockFlow() },
-        { label: "はじめて使う", primary: false, onClick: () => void startRegistration() },
+        { label: t("パスキーで開く"), onClick: () => void unlockFlow() },
+        { label: t("はじめて使う"), primary: false, onClick: () => void startRegistration() },
       ],
       showRecovery: true,
     });
@@ -1690,17 +1744,17 @@ async function boot(): Promise<void> {
       // First visit (or a new browser): lead with the intro (§4.6 紹介).
       showGate({
         actions: [
-          { label: "はじめて使う", onClick: () => void startRegistration() },
-          { label: "パスキーで開く", primary: false, onClick: () => void loginFlow() },
+          { label: t("はじめて使う"), onClick: () => void startRegistration() },
+          { label: t("パスキーで開く"), primary: false, onClick: () => void loginFlow() },
         ],
         showRecovery: true,
       });
       return;
     }
     showGate({
-      title: "接続できません",
-      body: "ネットワークを確認して、もう一度お試しください。",
-      actions: [{ label: "再試行", onClick: () => void boot() }],
+      title: t("接続できません"),
+      body: t("ネットワークを確認して、もう一度お試しください。"),
+      actions: [{ label: t("再試行"), onClick: () => void boot() }],
       error: true,
     });
   }
@@ -1733,4 +1787,5 @@ function cryptoWorkerUrl(): string {
 // crypto worker) and is inert in production.
 window.__txtDebug = { state };
 
+applyStaticLocale();
 void boot();
