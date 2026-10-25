@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 /**
  * Worker integration tests against the real D1/R2 bindings (spec §17.3–17.5).

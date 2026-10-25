@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
-import ts from "typescript";
+// TypeScript 7 removed the classic compiler API (createSourceFile etc.) from
+// the main entry; this test only needs source-text extraction, so it parses
+// with the pinned classic compiler kept as the `typescript5` alias.
+import ts from "typescript5";
 import { describe, expect, it, vi } from "vitest";
 
 // Execute the real main integration functions, without booting the app or networking.

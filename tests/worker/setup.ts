@@ -1,11 +1,11 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 
 /**
  * Test setup: applies D1 migrations to the isolated test database.
  */
 
 import { applyD1Migrations, env } from "cloudflare:test";
-import type { D1Migration } from "@cloudflare/vitest-pool-workers";
+import type { D1Migration } from "@cloudflare/vitest-plugin";
 import { beforeAll } from "vitest";
 
 interface TestEnv {

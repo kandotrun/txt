@@ -6,7 +6,7 @@
     ],
     "types": [
       "@cloudflare/workers-types",
-      "@cloudflare/vitest-pool-workers",
+      "@cloudflare/vitest-plugin",
       "vitest/globals"
     ],
     "allowImportingTsExtensions": true

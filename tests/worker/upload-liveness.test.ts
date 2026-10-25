@@ -1,4 +1,4 @@
-/// <reference types="@cloudflare/vitest-pool-workers/types" />
+/// <reference types="@cloudflare/vitest-plugin/types" />
 import { env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { runMaintenance } from "../../apps/worker/src/maintenance.ts";

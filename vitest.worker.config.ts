@@ -1,4 +1,4 @@
-import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-pool-workers";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 import path from "node:path";
 
@@ -10,9 +10,9 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
-          // The bundled workerd in vitest-pool-workers lags the production
-          // wrangler; pin the highest date that binary supports so tests can
-          // run while production keeps the newer compatibility date.
+          // The bundled workerd in @cloudflare/vitest-plugin lags the
+          // production wrangler; pin the highest date that binary supports so
+          // tests can run while production keeps the newer compatibility date.
           compatibilityDate: "2026-08-22",
           // Tests exercise the production host policy: the canonical origin and
           // RP ID, which also selects the `__Host-` session cookie. The local
