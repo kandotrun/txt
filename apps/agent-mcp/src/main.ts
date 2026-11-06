@@ -7,9 +7,12 @@
  *   txt-agent activate ...     see enroll.ts
  *   txt-agent set-token ...    see enroll.ts
  *   txt-agent fingerprint      prints the local public key fingerprint
+ *   txt-agent edit [--editor <cmd>] [--keep]
+ *                              edit the memo in your own editor (see edit.ts)
  */
 
 import { AgentState } from "./config.ts";
+import { edit } from "./edit.ts";
 import { activate, enroll, fingerprint, setToken } from "./enroll.ts";
 import { serveHttp, serveStdio } from "./server.ts";
 
@@ -36,9 +39,14 @@ async function main(): Promise<void> {
     case "fingerprint":
       await fingerprint(state);
       return;
+    case "edit":
+      await edit(state, rest);
+      return;
     default:
       console.error(`unknown command: ${command}`);
-      console.error("usage: txt-agent <serve [--http] | enroll | activate | set-token | fingerprint>");
+      console.error(
+        "usage: txt-agent <serve [--http] | enroll | activate | set-token | fingerprint | edit [--editor <cmd>] [--keep]>",
+      );
       process.exitCode = 2;
   }
 }

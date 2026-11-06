@@ -268,6 +268,128 @@ export function searchReplaceInModel(
 }
 
 /* ------------------------------------------------------------------ */
+/* Whole-text reconstruction (txt-agent edit, spec §6.6 exception)     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Placeholder labels per media kind — mirrors KIND_LABELS in
+ * packages/protocol/src/document.ts (`plainTextForCopy` renders media as
+ * `[画像: name]` / `[動画: name]` / `[音声: name]`, falling back to the
+ * label メディア with an empty name when the media info is missing).
+ */
+const MEDIA_KIND_LABELS: Record<string, string> = {
+  image: "画像",
+  video: "動画",
+  audio: "音声",
+};
+
+function mediaPlaceholder(model: DocumentModel, mediaId: string): string {
+  const info = model.media[mediaId];
+  const label = info ? (MEDIA_KIND_LABELS[info.kind] ?? "メディア") : "メディア";
+  const name = info ? info.name : "";
+  return `[${label}: ${name}]`;
+}
+
+export type EditedTextResult = { model: DocumentModel } | { reason: string };
+
+/**
+ * Rebuilds a document model from the plaintext a user edited in their own
+ * editor (`txt-agent edit`): the edited text is in `plainTextForCopy`
+ * format, where media appears as placeholders. Placeholders are matched
+ * sequentially against the sequence expected from the base model — a
+ * missing, renamed, reordered or extra placeholder refuses the edit
+ * (media cannot move, appear or disappear through this path). Media
+ * blocks keep their original block ID and mediaId; the media dictionary
+ * is copied unchanged (and `performWrite`'s referenced-media guard is a
+ * second safety net).
+ *
+ * Each run of text between two media blocks becomes ONE text block that
+ * inherits the first original text block ID of that run (multiple blocks
+ * merge, per §8's merging rule); a run that ends up empty still keeps an
+ * empty text block so media always has editable text around it (§8). A
+ * run with no original text block gets a fresh ID. An edit that
+ * reconstructs to exactly the base model is refused as unchanged.
+ */
+export function modelFromEditedText(base: DocumentModel, editedText: string): EditedTextResult {
+  if (editedText.includes("\r")) {
+    return { reason: "edited text contains CR characters; newlines must be LF" };
+  }
+  // Exact round-trip: the document is unchanged by definition, and base
+  // text that happens to read like a placeholder is kept intact (it is
+  // never reparsed as one).
+  if (editedText === plainTextForCopy(base)) {
+    return { reason: "document is unchanged" };
+  }
+
+  // Split the base into gaps (text runs) and expected placeholders.
+  interface Gap {
+    firstTextId: string | null;
+  }
+  const gaps: Gap[] = [{ firstTextId: null }];
+  const expected: Array<{ placeholder: string; blockId: string; mediaId: string }> = [];
+  for (const block of base.blocks) {
+    if (block.type === "text") {
+      const gap = gaps[gaps.length - 1] as Gap;
+      if (gap.firstTextId === null) gap.firstTextId = block.id;
+    } else {
+      expected.push({
+        placeholder: mediaPlaceholder(base, block.mediaId),
+        blockId: block.id,
+        mediaId: block.mediaId,
+      });
+      gaps.push({ firstTextId: null });
+    }
+  }
+
+  // Match the placeholders sequentially, left to right.
+  const editedGaps: string[] = [];
+  let cursor = 0;
+  for (const [index, item] of expected.entries()) {
+    const at = editedText.indexOf(item.placeholder, cursor);
+    if (at === -1) {
+      return {
+        reason:
+          `media placeholder ${index + 1} (${item.placeholder}) was not found in order in the edited text; ` +
+          "media blocks must stay in place, in order, with their placeholder text unchanged",
+      };
+    }
+    editedGaps.push(editedText.slice(cursor, at));
+    cursor = at + item.placeholder.length;
+  }
+  editedGaps.push(editedText.slice(cursor));
+
+  // A placeholder string surviving inside a gap means an extra (or
+  // duplicated) placeholder: media appearing through edit is refused.
+  for (const gapText of editedGaps) {
+    for (const item of expected) {
+      if (gapText.includes(item.placeholder)) {
+        return {
+          reason:
+            `the edited text contains an extra media placeholder (${item.placeholder}); ` +
+            "media cannot be added, removed, or duplicated through edit",
+        };
+      }
+    }
+  }
+
+  const blocks: DocumentModel["blocks"] = [];
+  for (const [index, gapText] of editedGaps.entries()) {
+    blocks.push({ id: gaps[index]?.firstTextId ?? newId(), type: "text", text: gapText });
+    const media = expected[index];
+    if (media) blocks.push({ id: media.blockId, type: "media", mediaId: media.mediaId });
+  }
+  const model: DocumentModel = {
+    schemaVersion: base.schemaVersion,
+    blocks,
+    media: structuredClone(base.media),
+  };
+  if (serializeDocument(model) === serializeDocument(base)) {
+    return { reason: "document is unchanged" };
+  }
+  return { model };
+}
+
+/* ------------------------------------------------------------------ */
 /* Line diff (conflict / preview reporting, design §9.4)               */
 /* ------------------------------------------------------------------ */
 
@@ -682,6 +804,22 @@ export class AgentVault {
         }
         throw error;
       }
+    });
+  }
+
+  /**
+   * Whole-text edit (`txt-agent edit`, spec §6.6 exception): the user
+   * edited the plaintext form in their own editor on the same device.
+   * The edited text is reconstructed into a model by
+   * `modelFromEditedText` and saved through the same CAS path as every
+   * other write — no separate save route is created.
+   */
+  async replaceWholeText(editedText: string): Promise<WriteOutcome> {
+    if (typeof editedText !== "string") throw new Error("editedText must be a string");
+    return this.performWrite("edit", (base) => {
+      const result = modelFromEditedText(base, editedText);
+      if ("reason" in result) return { reject: { reason: result.reason } };
+      return { model: result.model };
     });
   }
 
