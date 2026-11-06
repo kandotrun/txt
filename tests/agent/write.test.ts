@@ -287,6 +287,56 @@ describe("agent MCP vault writes", () => {
     expect(outcome.status).toBe("rejected");
   });
 
+  it("edit (replaceWholeText) saves a whole-text edit, preserving media and block IDs", async () => {
+    const { vault, state, stub } = await setup(mediaModel());
+    const outcome = await vault.replaceWholeText("before v2\n[画像: photo.jpg]after v2");
+    expect(outcome.status).toBe("saved");
+    if (outcome.status === "saved") expect(outcome.revision).toBe(1);
+    expect(await stub.currentText()).toBe("before v2\n[画像: photo.jpg]after v2");
+    const model = await stub.currentModel();
+    expect(model.blocks.map((block) => block.id)).toEqual([
+      FIRST_TEXT_ID,
+      MEDIA_BLOCK_ID,
+      TAIL_TEXT_ID,
+    ]);
+    expect(Object.keys(model.media)).toEqual([MEDIA_ID]);
+    // The pre-write ciphertext was backed up like every other write (§9.5).
+    expect(state.loadCiphertextBackups()).toHaveLength(1);
+  });
+
+  it("edit with a dropped media placeholder is rejected without writing", async () => {
+    const { vault, stub } = await setup(mediaModel());
+    const outcome = await vault.replaceWholeText("before\nafter");
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") expect(outcome.reason).toContain("[画像: photo.jpg]");
+    expect(stub.record.revision).toBe(0);
+    expect(stub.putAttempts).toBe(0);
+    expect(await stub.currentText()).toBe("before\n[画像: photo.jpg]after");
+  });
+
+  it("edit with unchanged text is rejected without writing", async () => {
+    const { vault, stub } = await setup(textOnlyModel("same"));
+    const outcome = await vault.replaceWholeText("same");
+    expect(outcome.status).toBe("rejected");
+    if (outcome.status === "rejected") expect(outcome.reason).toBe("document is unchanged");
+    expect(stub.putAttempts).toBe(0);
+  });
+
+  it("edit on a 412 conflict returns the diff and does not overwrite", async () => {
+    const { vault, stub } = await setup(textOnlyModel("base text"));
+    stub.hijackNextPutWith(textOnlyModel("browser edit"));
+    const outcome = await vault.replaceWholeText("edited text");
+    expect(outcome.status).toBe("conflict");
+    if (outcome.status === "conflict") {
+      expect(outcome.attempted).toBe("edit");
+      expect(outcome.baseRevision).toBe(0);
+      expect(outcome.latestRevision).toBe(1);
+      expect(outcome.diff).toContain("+ browser edit");
+    }
+    expect(stub.putAttempts).toBe(1);
+    expect(await stub.currentText()).toBe("browser edit");
+  });
+
   it("backup generations are capped at 20", async () => {
     const { vault, state } = await setup(textOnlyModel("x"));
     for (let i = 0; i < 22; i++) {
