@@ -7,7 +7,9 @@
  * slice is returned. The server never serves plaintext on this path — direct
  * requests to `/_local/` are 404/no-store (enforced by the Worker).
  *
- * Keys and decrypted Response bodies live only in memory. Nothing is persisted
+ * The page hands over only the per-file keys of the media in the open
+ * document — never the VaultKey. Keys and decrypted Response bodies live only
+ * in memory. Nothing is persisted
  * to Cache Storage or the HTTP cache. Each unlocked editing surface has its
  * own session bound via MessageChannel + a real clientId handshake.
  */
@@ -21,6 +23,7 @@ import {
   mediaChunkNonce,
 } from "../../../../packages/protocol/src/crypto.ts";
 import { fromBase64Url } from "../../../../packages/protocol/src/base64url.ts";
+import { renderableMime } from "./media-types.ts";
 
 declare const self: ServiceWorkerGlobalScope;
 
@@ -41,8 +44,6 @@ interface MediaInfo {
 interface SessionKeys {
   accountId: string;
   documentId: string;
-  keyVersion: number;
-  vaultKey: Uint8Array;
   media: Map<string, MediaInfo>;
   generation: number;
   ownerClientId: string;
@@ -54,8 +55,6 @@ interface Handshake {
   sessionGeneration: number;
   accountId: string;
   documentId: string;
-  keyVersion: number;
-  vaultKey: string;
   media: Record<string, MediaInfo>;
 }
 
@@ -85,8 +84,6 @@ self.addEventListener("message", (event) => {
     const nextSession: SessionKeys = {
       accountId: handshake.accountId,
       documentId: handshake.documentId,
-      keyVersion: handshake.keyVersion,
-      vaultKey: fromBase64Url(handshake.vaultKey),
       media: new Map(Object.entries(handshake.media)),
       generation: handshake.sessionGeneration,
       ownerClientId: clientId,
@@ -171,7 +168,12 @@ async function handleMediaRequest(event: FetchEvent): Promise<Response> {
 
   try {
     const headers = new Headers({
-      "content-type": info.mime,
+      // The stored type is data, not a decision: only the accepted media
+      // types are announced, and the response can never act as a document.
+      "content-type": renderableMime(info.mime),
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "cross-origin-resource-policy": "same-origin",
       "accept-ranges": "bytes",
       "cache-control": "no-store",
       "content-length": String(end - start + 1),

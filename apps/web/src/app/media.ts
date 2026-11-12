@@ -18,27 +18,7 @@ import type { MediaInfo, MediaKind } from "../../../../packages/protocol/src/doc
 import { api, ApiRequestError } from "./api.ts";
 import { t } from "./i18n.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
-
-const IMAGE_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "image/avif",
-  "image/heic",
-  "image/heif",
-]);
-const VIDEO_TYPES = new Set(["video/mp4", "video/webm", "video/quicktime"]);
-const AUDIO_TYPES = new Set([
-  "audio/mpeg",
-  "audio/mp4",
-  "audio/aac",
-  "audio/wav",
-  "audio/ogg",
-  "audio/webm",
-  "audio/flac",
-  "audio/x-m4a",
-]);
+import { mediaKindForType, renderableMime } from "./media-types.ts";
 
 const SIZE_LIMITS: Record<MediaKind, number> = MEDIA_SIZE_LIMITS;
 
@@ -55,16 +35,16 @@ export class MediaRejectedError extends Error {
 
 /** Classifies a file and enforces per-kind limits and MIME checks (§11.1). */
 export function classify(file: File): MediaKind {
-  const type = file.type.toLowerCase();
-  if (IMAGE_TYPES.has(type)) {
+  const kind = mediaKindForType(file.type);
+  if (kind === "image") {
     if (file.size > SIZE_LIMITS.image) throw new MediaRejectedError(t("画像は100MBまでです。"));
     return "image";
   }
-  if (VIDEO_TYPES.has(type)) {
+  if (kind === "video") {
     if (file.size > SIZE_LIMITS.video) throw new MediaRejectedError(t("動画は10GBまでです。"));
     return "video";
   }
-  if (AUDIO_TYPES.has(type)) {
+  if (kind === "audio") {
     if (file.size > SIZE_LIMITS.audio) throw new MediaRejectedError(t("音声は100MiBまでです。"));
     return "audio";
   }
@@ -319,7 +299,7 @@ export async function fetchDecrypted(options: {
     plainOffset += chunkPlain.byteLength;
     cipherOffset += cipherLength;
   }
-  return new Blob([plaintext as unknown as BlobPart], { type: info.mime });
+  return new Blob([plaintext as unknown as BlobPart], { type: renderableMime(info.mime) });
 }
 
 /**

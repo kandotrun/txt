@@ -2,6 +2,7 @@
  * Scheduled maintenance (spec §5.3, §11.8, §15).
  *
  * - Cleans stale pending accounts (24h).
+ * - Purges expired and long-revoked sessions and agent tokens.
  * - Removes unreferenced ready media after the 24h grace period.
  * - Retries unfinished/cancelled multipart cleanup.
  * - Finishes account deletion by removing ciphertext objects.
@@ -21,6 +22,7 @@ export async function runMaintenance(env: Env, _event?: ScheduledController): Pr
 
   await cleanStalePendingAccounts(env, now);
   await cleanExpiredChallenges(env, now);
+  await purgeDeadCredentials(env, now);
   await cleanUnreferencedMedia(env, now);
   await cleanStaleUploads(env, now);
   await finishAccountDeletions(env, now);
@@ -51,6 +53,29 @@ async function cleanExpiredChallenges(env: Env, now: number): Promise<void> {
   await env.DB.prepare(`DELETE FROM rate_limits WHERE window_start < ?1`)
     .bind(now - 24 * 60 * 60 * 1000)
     .run();
+}
+
+/**
+ * Token hashes that can never authorize anything again are not kept: an
+ * expired or long-revoked session, an expired or long-revoked agent token and
+ * an operation record past its expiry only add to what a database copy
+ * reveals (spec §14). Recently revoked rows stay for a day so a session list
+ * or an agent list read right after a revocation is still coherent.
+ */
+async function purgeDeadCredentials(env: Env, now: number): Promise<void> {
+  const dayAgo = now - 24 * 60 * 60 * 1000;
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM sessions
+        WHERE absolute_expires_at < ?1 OR idle_expires_at < ?1
+           OR (revoked_at IS NOT NULL AND revoked_at < ?2)`,
+    ).bind(now, dayAgo),
+    env.DB.prepare(
+      `DELETE FROM agent_tokens
+        WHERE expires_at < ?1 OR (revoked_at IS NOT NULL AND revoked_at < ?1)`,
+    ).bind(dayAgo),
+    env.DB.prepare(`DELETE FROM operations WHERE expires_at IS NOT NULL AND expires_at < ?1`).bind(now),
+  ]);
 }
 
 async function cleanUnreferencedMedia(env: Env, now: number): Promise<void> {
@@ -140,41 +165,82 @@ async function cleanStaleUploads(env: Env, now: number): Promise<void> {
   }
 }
 
+/**
+ * Objects removed per page (D1 binds at most 100 values per statement), and
+ * pages per account per run.
+ */
+const DELETE_PAGE = 90;
+const DELETE_PAGES_PER_RUN = 40;
+
+/**
+ * Removes every ciphertext object of one deleting account, a page at a time.
+ * A media row is deleted only after R2 confirmed its object is gone, so a
+ * row always stands for bytes that may still exist. Returns whether nothing
+ * is left; a failure or an exhausted budget leaves the rest for the next run.
+ */
+async function purgeAccountMedia(env: Env, accountId: string): Promise<boolean> {
+  for (let page = 0; page < DELETE_PAGES_PER_RUN; page++) {
+    const media = await env.DB.prepare(
+      `SELECT id, object_key, upload_id FROM media WHERE account_id = ?1 LIMIT ?2`,
+    )
+      .bind(accountId, DELETE_PAGE)
+      .all<{ id: string; object_key: string; upload_id: string | null }>();
+    const rows = media.results ?? [];
+    if (rows.length === 0) return true;
+
+    try {
+      for (const row of rows) {
+        if (!row.upload_id) continue;
+        try {
+          await env.MEDIA.resumeMultipartUpload(row.object_key, row.upload_id).abort();
+        } catch (error) {
+          // 10024 (NoSuchUpload) proves the multipart bytes are already gone;
+          // anything else cannot, so the row must survive for a retry.
+          if (!(error instanceof Error) || !/\(10024\)\s*$/.test(error.message)) throw error;
+        }
+      }
+      await env.MEDIA.delete(rows.map((row) => row.object_key));
+    } catch {
+      return false;
+    }
+
+    const ids = rows.map((row) => row.id);
+    const marks = ids.map((_, index) => `?${index + 2}`).join(",");
+    await env.DB.batch([
+      env.DB.prepare(
+        `DELETE FROM document_media WHERE media_id IN (${marks})
+            AND document_id IN (SELECT id FROM documents WHERE account_id = ?1)`,
+      ).bind(accountId, ...ids),
+      env.DB.prepare(`DELETE FROM media WHERE account_id = ?1 AND id IN (${marks})`).bind(accountId, ...ids),
+    ]);
+  }
+  return false;
+}
+
 async function finishAccountDeletions(env: Env, _now: number): Promise<void> {
   const accounts = await env.DB.prepare(
     `SELECT id FROM accounts WHERE status = 'deleting' LIMIT 10`,
   ).all<{ id: string }>();
 
   for (const account of accounts.results ?? []) {
-    const media = await env.DB.prepare(
-      `SELECT id, object_key FROM media WHERE account_id = ?1 LIMIT 200`,
-    )
-      .bind(account.id)
-      .all<{ id: string; object_key: string }>();
+    if (!(await purgeAccountMedia(env, account.id))) continue;
 
-    let failed = false;
-    for (const object of media.results ?? []) {
-      try {
-        await env.MEDIA.delete(object.object_key);
-      } catch {
-        failed = true;
-      }
-    }
-    if (failed) continue;
-
-    // Keep the minimum state needed to retry physical deletion, then remove
-    // the account row last so a partial failure cannot orphan data silently.
+    // No media row is left, so no ciphertext object is left. The account row
+    // goes last, and only if it is still deleting and still has no media.
     await env.DB.batch([
       env.DB.prepare(`DELETE FROM document_media WHERE document_id IN (
           SELECT id FROM documents WHERE account_id = ?1)`).bind(account.id),
-      env.DB.prepare(`DELETE FROM media WHERE account_id = ?1`).bind(account.id),
-      env.DB.prepare(`DELETE FROM documents WHERE account_id = ?1`).bind(account.id),
+      env.DB.prepare(`DELETE FROM documents WHERE account_id = ?1
+          AND NOT EXISTS (SELECT 1 FROM media WHERE account_id = ?1)`).bind(account.id),
       env.DB.prepare(`DELETE FROM key_envelopes WHERE account_id = ?1`).bind(account.id),
       env.DB.prepare(`DELETE FROM recovery WHERE account_id = ?1`).bind(account.id),
       env.DB.prepare(`DELETE FROM credentials WHERE account_id = ?1`).bind(account.id),
       env.DB.prepare(`DELETE FROM sessions WHERE account_id = ?1`).bind(account.id),
-      env.DB.prepare(`DELETE FROM storage_usage WHERE account_id = ?1`).bind(account.id),
-      env.DB.prepare(`DELETE FROM accounts WHERE id = ?1 AND status = 'deleting'`).bind(account.id),
+      env.DB.prepare(`DELETE FROM operations WHERE account_id = ?1`).bind(account.id),
+      env.DB.prepare(`DELETE FROM storage_usage WHERE account_id = ?1
+          AND NOT EXISTS (SELECT 1 FROM media WHERE account_id = ?1)`).bind(account.id),
+      env.DB.prepare(`DELETE FROM accounts WHERE id = ?1 AND status = 'deleting'
+          AND NOT EXISTS (SELECT 1 FROM media WHERE account_id = ?1)`).bind(account.id),
     ]);
   }
 }

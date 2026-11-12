@@ -8,11 +8,11 @@
 
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
-import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api, ApiRequestError } from "./api.ts";
 import type { AgentSummary } from "./api.ts";
 import { agentFingerprintDisplay, buildAgentWrapPayload } from "./agents.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
+import { debugHookAllowed } from "./debug-hook.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
 import {
   forgetAllKeptVaultKeys,
@@ -31,6 +31,7 @@ import { runIntro } from "./onboarding.ts";
 import { shareApp } from "./share.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
 import { ServiceWorkerBridge } from "./service-worker-bridge.ts";
+import { trustedScriptUrl } from "./trusted-types.ts";
 import type { SyncState } from "./sync.ts";
 import {
   addPasskey,
@@ -269,6 +270,10 @@ function showDialog(options: {
       if (settled) return;
       settled = true;
       dialog.removeEventListener("close", onClose);
+      // A dialog can show a recovery key, an agent token or document text.
+      // Callers keep their own references to the nodes they still need; the
+      // page itself must not go on holding the content once it is answered.
+      if (openToken === dialogToken) clearDialogContent();
       resolve(value);
     };
     const onClose = (): void => {
@@ -326,6 +331,13 @@ function showDialog(options: {
     dialog.returnValue = "";
     if (!dialog.open) dialog.showModal();
   });
+}
+
+/** Empties the shared dialog so nothing shown in it outlives its answer. */
+function clearDialogContent(): void {
+  elements.dialogTitle.textContent = "";
+  elements.dialogBody.replaceChildren();
+  elements.dialogActions.replaceChildren();
 }
 
 function textParagraph(text: string, className?: string): HTMLElement {
@@ -617,8 +629,11 @@ function setSyncState(next: SyncState, detail?: string): void {
     "auth-expired": t("再ログインが必要です"),
     "decrypt-failed": t("内容を開けません。データは変更していません。"),
   };
-  elements.syncStatus.textContent = detail ?? labels[next];
-  elements.syncStatus.dataset.state = next;
+  // Typing reports the same state on every keystroke; an unchanged live region
+  // is left alone so it neither re-announces nor re-lays out.
+  const label = detail ?? labels[next];
+  if (elements.syncStatus.textContent !== label) elements.syncStatus.textContent = label;
+  if (elements.syncStatus.dataset.state !== next) elements.syncStatus.dataset.state = next;
   if (next === "saved") {
     window.setTimeout(() => {
       if (elements.syncStatus.dataset.state === "saved") {
@@ -638,12 +653,14 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   const generation = state.sessionGeneration;
   serviceWorkerBridge?.reset();
   mediaReady = Promise.resolve(false);
+  let startedBridge: CryptoBridge | null = null;
 
   try {
     setSyncState("saving", t("読み込み中"));
-    const session = await api.session();
+    await api.session();
     if (generation !== state.sessionGeneration) return;
     const bridge = new CryptoBridge(cryptoWorkerUrl());
+    startedBridge = bridge;
     if (window.__txtDebug) window.__txtDebug.step = "session:api-done";
 
     // The document payload carries the real documentId; load it before unlocking
@@ -835,7 +852,22 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     keyVersion: vault.keyVersion,
   });
   if (generation !== state.sessionGeneration) return;
-  if (draft && draft.mutationId) {
+  // Any draft whose content differs from the server copy is unsynced input,
+  // whether or not a save for it had started when it was written. A draft that
+  // equals the server copy is a leftover of a best-effort clear and is dropped
+  // without asking.
+  let recovered: DocumentModel | null = null;
+  if (draft) {
+    try {
+      recovered = pruneUnreferencedMedia(JSON.parse(draft.documentJson) as DocumentModel);
+    } catch {
+      recovered = null;
+    }
+  }
+  if (draft && recovered && normalizedEqual(recovered, document)) {
+    await clearDraft({ accountId: vault.accountId, documentId: state.documentId });
+    if (generation !== state.sessionGeneration) return;
+  } else if (draft) {
     const decision = await showDialog({
       title: draft.provisional ? t("未確定の入力が残っています") : t("未同期の入力が残っています"),
       body: t("前回の続きがあります。採用しますか。"),
@@ -847,32 +879,21 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     if (generation !== state.sessionGeneration) return;
     if (decision === "accept") {
       try {
-        const recovered = pruneUnreferencedMedia(
-          JSON.parse(draft.documentJson) as DocumentModel,
-        );
-        if (normalizedEqual(recovered, document)) {
-          // The draft matches what the server already holds (a leftover from a
-          // best-effort clear): drop it silently instead of re-saving it.
-          await clearDraft({
-            accountId: vault.accountId,
-            documentId: state.documentId,
-          });
-        } else {
-          // The app state must carry the recovered media dictionary: the editor
-          // resolves node metadata through `state.document` (spec §10.6).
-          clearStreamSources();
-          state.document = recovered;
-          await syncServiceWorkerMedia();
-          if (generation !== state.sessionGeneration) return;
-          if (state.document !== recovered) throw new Error("draft superseded by remote document");
-          editor.applyRemoteDocument(recovered);
-          updateEmptyHint();
-          // Save from the base the draft was written against: if the server has
-          // moved past it, the save fails closed with 412 and the conflict
-          // dialog decides — never a silent overwrite (spec §10.4).
-          sync.setBaseFromDraft(draft.baseEtag);
-          sync.noteCommittedChange();
-        }
+        if (!recovered) throw new Error("draft is unreadable");
+        // The app state must carry the recovered media dictionary: the editor
+        // resolves node metadata through `state.document` (spec §10.6).
+        clearStreamSources();
+        state.document = recovered;
+        await syncServiceWorkerMedia();
+        if (generation !== state.sessionGeneration) return;
+        if (state.document !== recovered) throw new Error("draft superseded by remote document");
+        editor.applyRemoteDocument(recovered);
+        updateEmptyHint();
+        // Save from the base the draft was written against: if the server has
+        // moved past it, the save fails closed with 412 and the conflict
+        // dialog decides — never a silent overwrite (spec §10.4).
+        sync.setBaseFromDraft(draft.baseEtag);
+        sync.noteCommittedChange();
       } catch {
         toast(t("保存済みの下書きを読み込めませんでした。"));
       }
@@ -889,6 +910,8 @@ async function startSession(vault: UnlockedVault): Promise<void> {
   setSyncState("idle");
   editor.focus();
   } catch (error) {
+    // A worker that was handed the VaultKey must not outlive a failed start.
+    if (startedBridge && state.bridge !== startedBridge) startedBridge.lock();
     if (generation !== state.sessionGeneration) return;
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
@@ -923,7 +946,7 @@ async function setupServiceWorker(vault: UnlockedVault): Promise<void> {
   try {
     // Registration can stall independently of controller/ACK waiters.
     await Promise.race([
-      navigator.serviceWorker.register("/sw.js", { scope: "/", type: "module" }),
+      navigator.serviceWorker.register(trustedScriptUrl("/sw.js"), { scope: "/", type: "module" }),
       new Promise<never>((_, reject) => { timeout = setTimeout(() => reject(new Error("Service Worker timeout")), 8000); }),
     ]);
     if (generation !== state.sessionGeneration || swGeneration !== state.swGeneration || state.unlocked !== vault) return;
@@ -932,8 +955,6 @@ async function setupServiceWorker(vault: UnlockedVault): Promise<void> {
       sessionGeneration: swGeneration,
       accountId: vault.accountId,
       documentId: state.documentId,
-      keyVersion: vault.keyVersion,
-      vaultKey: toBase64Url(vault.vaultKey),
       media: state.document.media,
     });
     await mediaReady;
@@ -978,7 +999,6 @@ function lockVault(reason: string): void {
     window.setTimeout(() => lockVault(reason), 1500);
     return;
   }
-  if (state.editor && !state.editor.isSafePoint()) return;
   dismissCoach?.();
   state.sessionGeneration += 1;
   serviceWorkerBridge?.reset();
@@ -986,17 +1006,22 @@ function lockVault(reason: string): void {
   for (const entry of state.attaching.values()) entry.controller.abort();
   state.attaching.clear();
   renderAttachProgress();
+  // Lock protects what was typed: store the draft now, not a window later.
+  void state.sync?.persistDraftNow();
   state.sync?.stop();
   state.sync = null;
   state.bridge?.lock();
   state.bridge = null;
-  const accountId = state.unlocked.accountId;
   state.unlocked = null;
+  // Nothing typed or shown while unlocked stays in the DOM behind the gate.
+  dialogToken += 1;
+  if (elements.dialog.open) elements.dialog.close();
+  clearDialogContent();
+  elements.recoveryInput.value = "";
   for (const url of state.objectUrls.values()) URL.revokeObjectURL(url);
   state.objectUrls.clear();
   state.document = { schemaVersion: 1, blocks: [], media: {} };
   state.editor?.replaceDocument({ schemaVersion: 1, blocks: [{ id: crypto.randomUUID(), type: "text", text: "" }], media: {} });
-  void accountId;
   showGate({
     title: t("パスキーで開く"),
     body: reason,
@@ -1197,6 +1222,8 @@ async function recoveryFlow(): Promise<void> {
   elements.gateFootnote.dataset.state = "idle";
   try {
     const outcome = await (await import("./vault.ts")).recoverWithKey(value);
+    // The typed recovery key has been spent (it is rotated on completion).
+    elements.recoveryInput.value = "";
     await confirmRecoveryKey(outcome.newRecoveryKeyText);
     await startSession({
       vaultKey: outcome.vaultKey,
@@ -1766,7 +1793,6 @@ declare global {
       state: typeof state;
       lastError?: string;
       step?: string;
-      documentIssues?: string[];
     };
   }
 }
@@ -1783,9 +1809,9 @@ function cryptoWorkerUrl(): string {
 }
 
 // Development-only inspection hook: lets the E2E suite observe async state
-// without guessing from the DOM. It exposes no secrets (keys stay inside the
-// crypto worker) and is inert in production.
-window.__txtDebug = { state };
+// without guessing from the DOM. `state` reaches the unlocked vault and the
+// decrypted document, so the hook exists on a local dev server only.
+if (debugHookAllowed(window.location)) window.__txtDebug = { state };
 
 applyStaticLocale();
 void boot();

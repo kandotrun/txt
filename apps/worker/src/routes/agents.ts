@@ -18,13 +18,11 @@
 import { Hono } from "hono";
 
 import type { AppBindings } from "../context.ts";
-import { clientBucketKey, enforceRateLimit, requireAuth } from "../context.ts";
+import { clientBucketKey, enforceRateLimit, rateLimitScale, requireAgent, requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, requireStepUp } from "../auth/sessions.ts";
 import {
   AGENT_READ_SCOPE,
   AGENT_WRITE_SCOPE,
-  requireAgentAuth,
-  touchAgentAuth,
 } from "../auth/agent.ts";
 import {
   badRequest,
@@ -50,10 +48,6 @@ import {
 } from "../../../../packages/protocol/src/windows.ts";
 
 const routes = new Hono<AppBindings>();
-
-function rateScale(origin: string): number {
-  return origin.startsWith("http://") ? 20 : 1;
-}
 
 interface AgentKeyRow {
   agent_id: string;
@@ -165,7 +159,7 @@ routes.post("/agents/enrollments", async (c) => {
   const bucketKey = await clientBucketKey(c, "agent:enroll");
   await enforceRateLimit(c, {
     bucketKey,
-    limit: 30 * rateScale(c.env.APP_ORIGIN),
+    limit: 30 * rateLimitScale(c.env),
     windowMs: 60 * 60 * 1000,
   });
 
@@ -198,7 +192,7 @@ routes.post("/agents/enrollments/:id/pubkey", async (c) => {
   const bucketKey = await clientBucketKey(c, "agent:enroll:pubkey");
   await enforceRateLimit(c, {
     bucketKey,
-    limit: 60 * rateScale(c.env.APP_ORIGIN),
+    limit: 60 * rateLimitScale(c.env),
     windowMs: 60 * 60 * 1000,
   });
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
@@ -291,7 +285,7 @@ routes.post("/agents/enrollments/:id/canary-challenge", async (c) => {
   const bucketKey = await clientBucketKey(c, "agent:enroll:canary");
   await enforceRateLimit(c, {
     bucketKey,
-    limit: 60 * rateScale(c.env.APP_ORIGIN),
+    limit: 60 * rateLimitScale(c.env),
     windowMs: 60 * 60 * 1000,
   });
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
@@ -324,7 +318,7 @@ routes.post("/agents/enrollments/:id/canary", async (c) => {
   const bucketKey = await clientBucketKey(c, "agent:enroll:canary");
   await enforceRateLimit(c, {
     bucketKey,
-    limit: 60 * rateScale(c.env.APP_ORIGIN),
+    limit: 60 * rateLimitScale(c.env),
     windowMs: 60 * 60 * 1000,
   });
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
@@ -501,12 +495,11 @@ routes.delete("/agents/:id", async (c) => {
 /* ------------------------------------------------------------------ */
 
 routes.get("/agent/envelope", async (c) => {
-  const auth = await requireAgentAuth(c.req.raw, c.env, AGENT_READ_SCOPE);
+  const auth = await requireAgent(c, AGENT_READ_SCOPE);
   const row = await loadAgent(c, auth.agentId);
   if (!row || row.state !== "active" || !row.wrapped_key) {
     throw notFound("envelope not found");
   }
-  await touchAgentAuth(c.env, auth);
   return c.json({
     agentId: row.agent_id,
     accountId: row.account_id,

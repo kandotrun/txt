@@ -9,6 +9,8 @@ import esbuild from "esbuild";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { renderStaticHeaders } from "../worker/src/security-headers.ts";
+
 const root = path.dirname(new URL(import.meta.url).pathname);
 const dist = path.join(root, "dist");
 
@@ -60,7 +62,6 @@ for (const name of [
   "styles.css",
   "manifest.webmanifest",
   "icon.svg",
-  "_headers",
   // Share card and crawler files (spec §14).
   "og.png",
   "apple-touch-icon.png",
@@ -81,6 +82,11 @@ for (const [from, to] of [
 ]) {
   await fs.copyFile(path.join(repoRoot, from), path.join(dist, to));
 }
+
+// `_headers` is a template: the header values have one source of truth, shared
+// with the Worker (spec §14).
+const headersTemplate = await fs.readFile(path.join(root, "static", "_headers"), "utf8");
+await fs.writeFile(path.join(dist, "_headers"), renderStaticHeaders(headersTemplate));
 
 // index.html references the hashed app bundle and the crypto worker URL.
 const html = await fs.readFile(path.join(dist, "index.html"), "utf8");

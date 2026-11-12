@@ -50,6 +50,10 @@ function baseFields(response: Record<string, unknown>): {
   rawId: string;
   inner: Record<string, unknown>;
 } {
+  // Callers pass the request body's `response` field unchecked.
+  if (typeof response !== "object" || response === null || Array.isArray(response)) {
+    throw badRequest("response must be an object");
+  }
   const inner = response["response"];
   if (typeof inner !== "object" || inner === null || Array.isArray(inner)) {
     throw badRequest("response.response must be an object");

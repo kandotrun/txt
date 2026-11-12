@@ -190,7 +190,6 @@ const EN: Record<string, string> = {
   トークンを発行しました: "Token issued",
   "AIエージェントに接続作業を任せる場合は、この手順書のリンクをAIに渡してください。":
     "To let an AI agent handle the connection setup, give it the link to this guide.",
-  AI向け手順書: "Guide for AI agents",
 
   // "More" menu
   この端末の保持を解除: "Stop keeping on this device",
@@ -325,8 +324,6 @@ export function applyStaticLocale(): void {
   setMeta('meta[property="og:description"]', t("パスキーだけで使える、あなた専用の1枚。本文と添付は端末で暗号化され、サーバーには暗号文だけが届きます。"));
   setMeta('meta[property="og:image:alt"]', t("txt. — メールアドレスなしで、1枚のテキストを。"));
   setMeta('meta[property="og:locale"]', "en_US");
-  setMeta('meta[name="twitter:title"]', t("txt — メールアドレスなしで、1枚のテキストを。"));
-  setMeta('meta[name="twitter:description"]', t("パスキーだけで使える、あなた専用の1枚。本文と添付は端末で暗号化され、サーバーには暗号文だけが届きます。"));
 
   const setText = (selector: string, value: string) => {
     const node = document.querySelector(selector);
@@ -336,15 +333,15 @@ export function applyStaticLocale(): void {
     document.querySelector(selector)?.setAttribute(name, value);
   };
   setText(".empty-hint", t("ここから書く。自動で保存されます。"));
-  setAttr("#editor", "aria-label", t("テキスト"));
+  setAttr("#editor-host", "aria-label", t("テキスト"));
   setAttr("#attach-button", "title", t("添付"));
   setAttr("#attach-button", "aria-label", t("添付"));
   setAttr("#more-button", "title", t("その他"));
   setAttr("#more-button", "aria-label", t("その他"));
-  setText(".gate-recovery summary", t("復旧キーで開く"));
-  const recoveryLabel = document.querySelector(".gate-recovery .field span");
+  setText(".gate-details summary", t("復旧キーで開く"));
+  const recoveryLabel = document.querySelector(".gate-details .field span");
   if (recoveryLabel) recoveryLabel.textContent = t("復旧キー");
   setText("#recovery-submit", t("復旧キーを使う"));
-  setText(".intro-skip", t("スキップ"));
+  setText("#intro-skip", t("スキップ"));
   setAttr(".dialog-close", "aria-label", t("閉じる"));
 }

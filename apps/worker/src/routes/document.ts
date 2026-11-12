@@ -10,14 +10,12 @@
 import { Hono } from "hono";
 
 import type { AppBindings, AppContext } from "../context.ts";
-import { requireAuth } from "../context.ts";
+import { requireAgent, requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, touchSession } from "../auth/sessions.ts";
 import {
   AGENT_READ_SCOPE,
   AGENT_WRITE_SCOPE,
   hasAuthorizationHeader,
-  requireAgentAuth,
-  touchAgentAuth,
 } from "../auth/agent.ts";
 import type { AgentAuthContext } from "../auth/agent.ts";
 import { ApiError, badRequest, preconditionRequired } from "../errors.ts";
@@ -51,8 +49,7 @@ async function resolveDocumentReader(
     throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
   }
   if (hasBearer) {
-    const agent = await requireAgentAuth(c.req.raw, c.env, AGENT_READ_SCOPE);
-    await touchAgentAuth(c.env, agent);
+    const agent = await requireAgent(c, AGENT_READ_SCOPE);
     return { accountId: agent.accountId, agent };
   }
   const auth = await requireAuth(c);
@@ -168,8 +165,7 @@ routes.put("/document", async (c) => {
     if (hasCookie) {
       throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
     }
-    const agent = await requireAgentAuth(c.req.raw, c.env, AGENT_WRITE_SCOPE);
-    await touchAgentAuth(c.env, agent);
+    const agent = await requireAgent(c, AGENT_WRITE_SCOPE);
     return applyDocumentPut(c, agent.accountId);
   }
   const auth = await requireAuth(c);

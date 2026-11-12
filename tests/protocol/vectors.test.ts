@@ -24,7 +24,6 @@ import {
   mediaChunkAad,
   mediaChunkNonce,
   parseRecoveryKey,
-  recoveryAad,
   sha256,
   unwrapVaultKey,
   vaultKeyAad,

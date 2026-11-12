@@ -11,11 +11,12 @@
  */
 
 import type { Env, SessionRow } from "../types.ts";
-import { ApiError, scopeRequired, unauthorized } from "../errors.ts";
+import { ApiError, scopeRequired } from "../errors.ts";
 import { sha256, nowMs, bytesToBase64Url } from "../util.ts";
 import {
   SESSION_ABSOLUTE_TTL_MS,
   SESSION_IDLE_TTL_MS,
+  RECOVERY_SESSION_TTL_MS,
   STEPUP_TTL_MS as SHARED_STEPUP_TTL_MS,
 } from "../../../../packages/protocol/src/windows.ts";
 
@@ -68,6 +69,23 @@ export function readSessionToken(
   return null;
 }
 
+/** A deployment is production unless APP_ORIGIN is plain http (local dev). */
+export function isDevelopmentEnv(env: Env): boolean {
+  return env.APP_ORIGIN.startsWith("http://");
+}
+
+/**
+ * The only origins that may call the API. Production accepts exactly
+ * APP_ORIGIN; a local http deployment also accepts loopback origins, because
+ * the dev server port is chosen by the developer.
+ */
+export function isAllowedOrigin(origin: string | null | undefined, env: Env): boolean {
+  if (!origin) return false;
+  if (origin === env.APP_ORIGIN) return true;
+  if (!isDevelopmentEnv(env)) return false;
+  return origin.startsWith("http://localhost:") || origin.startsWith("http://127.0.0.1:");
+}
+
 /**
  * Verifies the request origin for cookie-authenticated writes.
  *
@@ -76,17 +94,8 @@ export function readSessionToken(
 export function assertWriteRequestAllowed(request: Request, via: "cookie", env: Env): void {
   if (via === "cookie") {
     const origin = request.headers.get("origin");
-    // Development serves the app from localhost while APP_ORIGIN may already
-    // point at the production host (wrangler rewrites Host). A local origin is
-    // accepted only when APP_ORIGIN itself is non-https.
-    const development = env.APP_ORIGIN.startsWith("http://");
-    const originAllowed =
-      origin === env.APP_ORIGIN ||
-      (development && (origin === "http://localhost:8799" || origin === "http://127.0.0.1:8799" ||
-        origin?.startsWith("http://localhost:") === true ||
-        origin?.startsWith("http://127.0.0.1:") === true));
-    if (!originAllowed) {
-      const detail = env.APP_ORIGIN.startsWith("http://") ? ` (origin=${String(origin)})` : "";
+    if (!isAllowedOrigin(origin, env)) {
+      const detail = isDevelopmentEnv(env) ? ` (origin=${String(origin)})` : "";
       throw new ApiError(403, "ORIGIN_REJECTED", `origin is not allowed${detail}`);
     }
     if (request.headers.get("x-txt-request") !== "1") {
@@ -131,30 +140,26 @@ export async function resolveSession(
   };
 }
 
-export async function requireSession(request: Request, env: Env): Promise<AuthContext> {
-  const auth = await resolveSession(request, env);
-  if (!auth) throw unauthorized();
-  return auth;
-}
+/**
+ * What a recovery-scoped session may call (spec §7.2): read the key wraps,
+ * register the replacement passkey, confirm, and sign out. Everything else —
+ * the document, media, passkey and agent management — waits for completion.
+ */
+const RECOVERY_SCOPE_ROUTES: ReadonlySet<string> = new Set([
+  "GET /api/v1/session",
+  "DELETE /api/v1/session",
+  "GET /api/v1/keys",
+  "POST /api/v1/recovery/options",
+  "POST /api/v1/recovery/complete",
+]);
 
-export async function requireActiveSession(request: Request, env: Env): Promise<AuthContext> {
-  const auth = await requireSession(request, env);
-  if (auth.scope !== "active") throw scopeRequired("active session required");
-  return auth;
-}
-
-export async function requirePendingSession(request: Request, env: Env): Promise<AuthContext> {
-  const auth = await requireSession(request, env);
-  if (auth.scope !== "pending" && auth.scope !== "active") {
-    throw scopeRequired("pending or active session required");
+/** Deny-by-default gate for restricted session scopes. */
+export function assertScopeAllowsRoute(auth: AuthContext, request: Request): void {
+  if (auth.scope !== "recovery") return;
+  const route = `${request.method} ${new URL(request.url).pathname}`;
+  if (!RECOVERY_SCOPE_ROUTES.has(route)) {
+    throw scopeRequired("not available to a recovery session");
   }
-  return auth;
-}
-
-export async function requireRecoverySession(request: Request, env: Env): Promise<AuthContext> {
-  const auth = await requireSession(request, env);
-  if (auth.scope !== "recovery") throw scopeRequired("recovery session required");
-  return auth;
 }
 
 /** Sensitive operations require a step-up re-authentication within 5 minutes. */
@@ -175,7 +180,10 @@ export async function issueSession(
     authEpoch: number;
     sid?: string;
   },
-): Promise<{ token: string; sid: string; expiresAt: number }> {
+): Promise<{ token: string; sid: string; expiresAt: number; maxAgeMs: number }> {
+  // A recovery session only has to outlive one ceremony (spec §7.2).
+  const absoluteTtl = options.scope === "recovery" ? RECOVERY_SESSION_TTL_MS : ABSOLUTE_TTL_MS;
+  const idleTtl = Math.min(IDLE_TTL_MS, absoluteTtl);
   const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
   const token = bytesToBase64Url(tokenBytes);
   const hash = await sha256(new TextEncoder().encode(token));
@@ -195,16 +203,18 @@ export async function issueSession(
       options.scope,
       options.authEpoch,
       now,
-      now + ABSOLUTE_TTL_MS,
-      now + IDLE_TTL_MS,
+      now + absoluteTtl,
+      now + idleTtl,
     )
     .run();
-  return { token, sid, expiresAt: now + ABSOLUTE_TTL_MS };
+  return { token, sid, expiresAt: now + absoluteTtl, maxAgeMs: absoluteTtl };
 }
 
 /** Sliding idle expiry: each authorized request extends the idle window. */
 export async function touchSession(env: Env, auth: AuthContext): Promise<void> {
   const now = nowMs();
+  // Short-lived scopes keep the expiry they were issued with.
+  if (auth.scope === "recovery") return;
   if (auth.session.idle_expires_at - now < IDLE_TTL_MS - 60_000) {
     await env.DB.prepare(`UPDATE sessions SET idle_expires_at = ?1 WHERE sid = ?2`)
       .bind(now + IDLE_TTL_MS, auth.session.sid)
@@ -212,12 +222,12 @@ export async function touchSession(env: Env, auth: AuthContext): Promise<void> {
   }
 }
 
-export function sessionCookie(token: string, env: Env): string {
+export function sessionCookie(token: string, env: Env, maxAgeMs: number = ABSOLUTE_TTL_MS): string {
   const secure = env.APP_ORIGIN.startsWith("https://") ? "; Secure" : "";
   // No Domain attribute: `__Host-` requires host-only scope, Path=/ and Secure.
   // `Max-Age` makes this a persistent cookie: without it the browser drops the
   // session on close, which would defeat the 30-day idle window (spec §5.4).
-  return `${sessionCookieName(env)}=${token}; HttpOnly; Path=/; SameSite=Strict${secure}; Max-Age=${Math.floor(ABSOLUTE_TTL_MS / 1000)}`;
+  return `${sessionCookieName(env)}=${token}; HttpOnly; Path=/; SameSite=Strict${secure}; Max-Age=${Math.floor(maxAgeMs / 1000)}`;
 }
 
 export function clearSessionCookie(env: Env): string {

@@ -7,6 +7,7 @@
  */
 
 import type { DocumentModel } from "../../../../packages/protocol/src/document.ts";
+import { trustedScriptUrl } from "./trusted-types.ts";
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -19,7 +20,6 @@ export class CryptoBridge {
   private unlocked: Promise<void>;
   private resolveUnlocked: (() => void) | null = null;
   private rejectUnlocked: ((reason: Error) => void) | null = null;
-  private lockGeneration = 0;
   /**
    * Media IDs dropped while repairing the last decrypted document (spec §8).
    * The load path re-saves the repaired model so every client sees a clean
@@ -28,11 +28,13 @@ export class CryptoBridge {
   private lastDropped: string[] = [];
 
   constructor(workerUrl: string) {
-    this.worker = new Worker(workerUrl, { type: "module", name: "txt-crypto" });
+    this.worker = new Worker(trustedScriptUrl(workerUrl), { type: "module", name: "txt-crypto" });
     this.unlocked = new Promise((resolve, reject) => {
       this.resolveUnlocked = resolve;
       this.rejectUnlocked = reject;
     });
+    // Nobody may be waiting yet when the worker fails or the bridge is locked.
+    this.unlocked.catch(() => undefined);
     this.worker.addEventListener("message", (event) => this.onMessage(event));
     this.worker.addEventListener("error", (event) => {
       this.rejectUnlocked?.(new Error(event.message || "crypto worker failed"));
@@ -89,6 +91,7 @@ export class CryptoBridge {
       this.resolveUnlocked = resolve;
       this.rejectUnlocked = reject;
     });
+    this.unlocked.catch(() => undefined);
     this.worker.postMessage({
       type: "unlock",
       vaultKey: options.vaultKey,
@@ -99,17 +102,20 @@ export class CryptoBridge {
     await this.unlocked;
   }
 
+  /**
+   * Ends this bridge for good: the worker wipes its key and is then
+   * terminated, so no copy of the VaultKey survives in a parked thread. Every
+   * unlock builds a new bridge.
+   */
   lock(): void {
-    this.lockGeneration += 1;
     this.worker.postMessage({ type: "lock" });
+    this.worker.terminate();
+    this.rejectUnlocked?.(new Error("locked"));
+    this.rejectUnlocked = null;
     for (const [, pending] of this.pending) {
       pending.reject(new Error("locked"));
     }
     this.pending.clear();
-  }
-
-  get generation(): number {
-    return this.lockGeneration;
   }
 
   async encryptDocument(options: {

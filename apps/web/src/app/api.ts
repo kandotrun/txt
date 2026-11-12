@@ -21,18 +21,6 @@ export class ApiRequestError extends Error {
     this.status = status;
     this.code = code;
   }
-
-  get isAuthFailure(): boolean {
-    return this.status === 401;
-  }
-
-  get isPrecondition(): boolean {
-    return this.status === 412;
-  }
-
-  get isUnprocessable(): boolean {
-    return this.status === 422;
-  }
 }
 
 export interface DocumentResponse {
@@ -196,10 +184,10 @@ class ApiClient {
     );
   }
 
-  stepupOptions(credentialId?: string) {
+  stepupOptions() {
     return this.request<{ options: PublicKeyCredentialRequestOptionsJSON }>(
       "/api/v1/auth/stepup/options",
-      { method: "POST", json: credentialId ? { credentialId } : {} },
+      { method: "POST", json: {} },
     );
   }
 
@@ -233,19 +221,6 @@ class ApiClient {
     );
   }
 
-  credentials() {
-    return this.request<{
-      credentials: Array<{
-        credentialId: string;
-        deviceType: string;
-        backedUp: boolean;
-        status: string;
-        createdAt: number;
-        lastUsedAt: number | null;
-      }>;
-    }>("/api/v1/credentials");
-  }
-
   credentialAddOptions(userHandle: string) {
     return this.request<{ options: PublicKeyCredentialCreationOptionsJSON }>(
       "/api/v1/credentials/options",
@@ -267,17 +242,18 @@ class ApiClient {
     );
   }
 
-  revokeCredential(credentialId: string) {
-    return this.request<{ ok: boolean }>(
-      `/api/v1/credentials/${encodeURIComponent(credentialId)}`,
-      { method: "DELETE" },
-    );
-  }
-
   recoveryStart(accountId: string, recoveryAuth: string) {
     return this.request<{ scope: string; recoveryVersion: number; keyVersion: number }>(
       "/api/v1/recovery/start",
       { method: "POST", json: { accountId, recoveryAuth } },
+    );
+  }
+
+  /** Registration options for the replacement passkey (recovery session only). */
+  recoveryOptions() {
+    return this.request<{ options: PublicKeyCredentialCreationOptionsJSON }>(
+      "/api/v1/recovery/options",
+      { method: "POST", json: {} },
     );
   }
 
@@ -340,13 +316,6 @@ class ApiClient {
     });
   }
 
-  revokeAgentToken(agentId: string, tokenId: string) {
-    return this.request<{ ok: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(agentId)}/tokens/${encodeURIComponent(tokenId)}`,
-      { method: "DELETE" },
-    );
-  }
-
   /* document */
   async document(etag?: string): Promise<{ data?: DocumentResponse; etag?: string; notModified: boolean }> {
     const headers = new Headers();
@@ -395,16 +364,6 @@ class ApiClient {
     }>("/api/v1/media/uploads", { method: "POST", json: payload });
   }
 
-  uploadStatus(mediaId: string) {
-    return this.request<{
-      mediaId: string;
-      state: string;
-      cipherBytes: number;
-      partCount: number;
-      acceptedParts: Array<{ partNumber: number; bytes: number }>;
-    }>(`/api/v1/media/uploads/${encodeURIComponent(mediaId)}`);
-  }
-
   async uploadPart(mediaId: string, partNumber: number, bytes: Uint8Array, signal?: AbortSignal): Promise<void> {
     const response = await fetch(
       `/api/v1/media/uploads/${encodeURIComponent(mediaId)}/parts/${partNumber}`,
@@ -450,26 +409,6 @@ class ApiClient {
   }
 
   /* sessions & account */
-  sessions() {
-    return this.request<{
-      sessions: Array<{
-        sid: string;
-        clientKind: string;
-        scope: string;
-        createdAt: number;
-        expiresAt: number;
-        idleExpiresAt: number;
-        isCurrent: boolean;
-      }>;
-    }>("/api/v1/sessions");
-  }
-
-  revokeSession(sid: string) {
-    return this.request<{ ok: boolean }>(`/api/v1/sessions/${encodeURIComponent(sid)}`, {
-      method: "DELETE",
-    });
-  }
-
   deleteAccount(operationId: string) {
     return this.request<{ ok: boolean; operationId: string; state: string }>("/api/v1/account", {
       method: "DELETE",

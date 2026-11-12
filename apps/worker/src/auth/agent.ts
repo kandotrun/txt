@@ -124,17 +124,21 @@ export async function requireAgentAuth(
   return auth;
 }
 
-/** Best-effort usage stamps; failures never change the request outcome. */
+/**
+ * Usage stamps, at one-minute resolution: a burst of agent requests rewrites
+ * neither row more than once a minute.
+ */
 export async function touchAgentAuth(env: Env, auth: AgentAuthContext): Promise<void> {
   const now = nowMs();
+  const stale = now - 60_000;
   await env.DB.batch([
-    env.DB.prepare(`UPDATE agent_tokens SET last_used_at = ?1 WHERE token_id = ?2`).bind(
-      now,
-      auth.tokenId,
-    ),
-    env.DB.prepare(`UPDATE agent_keys SET last_used_at = ?1 WHERE agent_id = ?2`).bind(
-      now,
-      auth.agentId,
-    ),
+    env.DB.prepare(
+      `UPDATE agent_tokens SET last_used_at = ?1
+        WHERE token_id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)`,
+    ).bind(now, auth.tokenId, stale),
+    env.DB.prepare(
+      `UPDATE agent_keys SET last_used_at = ?1
+        WHERE agent_id = ?2 AND (last_used_at IS NULL OR last_used_at < ?3)`,
+    ).bind(now, auth.agentId, stale),
   ]);
 }

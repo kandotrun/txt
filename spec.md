@@ -4,7 +4,7 @@
 
 提供形態はWebのみとする。デスクトップ・スマートフォンのブラウザーから利用し、ネイティブアプリは提供・開発しない。レスポンシブUI、Apple端末のブラウザー、WebAuthn/PRF、メディアService Worker、Apple-touch icon、OGP、Web Shareは継続する。
 
-仕様版: 1.4（Web-only）。更新日: 2026-10-25。本書1ファイルを実装基準とする。リポジトリの従来の統合仕様、先行する設計改善案、日本語IMEを必須とする追加要件を統合した。Cloudflare Access、特定メールドメイン制限、Worker側の本文復号、R2 SSE-Cを主たる暗号化とする旧案は採用しない。
+仕様版: 1.5（Web-only）。更新日: 2026-11-12。本書1ファイルを実装基準とする。リポジトリの従来の統合仕様、先行する設計改善案、日本語IMEを必須とする追加要件を統合した。Cloudflare Access、特定メールドメイン制限、Worker側の本文復号、R2 SSE-Cを主たる暗号化とする旧案は採用しない。
 
 本書の「必須」「禁止」「受け入れ条件」は実装上の契約である。数値、UI配置、暗号コンテナー、状態遷移は本アプリの設計判断で、引用資料が一律に推奨する値ではない。公式APIの根拠は末尾に記載する。仕様の完成と、アプリの実装・実機試験・セキュリティ監査の完了は区別する。
 
@@ -13,6 +13,8 @@
 特に、日本語IMEで日常的に入力することを前提とする。ブラウザーとパスキー保存先のPRF互換性、IMEと非同期処理の共存、E2EE動画のシーク再生を先行検証し、合格前に対応済みと宣伝しない。
 
 1.4で、利用者本人のAIエージェント接続を追加する（§6.6）。復号は利用者の端末側（ローカルMCPサーバー）でのみ行い、Worker側の本文復号を引き続き採用しない。サーバーが平文・鍵を受け取らない境界はエージェント接続でも変わらない。あわせてWeb UIの日本語/英語の二言語対応を定める（§4.7）。
+
+1.5で、認証・復旧・配信の境界を強化する。復旧用パスキー登録にサーバー発行の一回限りのchallengeを必須とし（§7.2、§12.2）、bootstrapをpendingアカウントの一度きりの確定に限定し（§5.3）、パスキーの追加・失効にstep-upを必須とする（§5.4）。応答ヘッダーとTrusted Types（§14）、ブラウザー起点のAPI要求の同一Origin限定（§5.4）、復号応答のMIME許可リスト（§11.6）、エージェント経路のレート制限値（§5.4）を定める。暗号形式、DBスキーマ、既存データは変更しない。
 
 ## 2. 採用する全体構成
 
@@ -148,9 +150,9 @@ WebのOriginは`https://txt.2-38.com`のみ。clientDataJSONを同じRPへ厳密
 
 登録中はpendingで、文書APIを許可しない。パスキー作成・署名確認、PRF実出力取得、VaultKeyのラップと試験復号、復旧キー保存確認の順に進める。登録時にPRF出力がなければ追加assertionを行う。
 
-bootstrap APIで暗号化空文書、資格情報用の鍵ラップ、復旧情報、bootstrapIdを送る。初期revisionは0、初期mutationIdはbootstrapIdとし、D1で保存とactive化を一括確定する。同じbootstrapIdで異なる初期鍵・ペイロードを上書きしない。試験復号は端末内で行う。
+bootstrap APIで暗号化空文書、資格情報用の鍵ラップ、復旧情報、bootstrapIdを送る。初期revisionは0、初期mutationIdはbootstrapIdとし、D1で保存とactive化を一括確定する。同じbootstrapIdで異なる初期鍵・ペイロードを上書きしない。試験復号は端末内で行う。bootstrapはpendingのアカウントとpendingの資格情報に対する一度きりの確定であり、active化後は同じbootstrapIdの再送に完了済みと答えるだけとする。active化後のbootstrapで復旧情報の置換、失効済み資格情報の再有効化、鍵ラップの追加を行ってはならず、バッチ内の各文はアカウントがpendingであることをSQLで確認する。
 
-PRF非対応しか使えない環境では新規登録を完了させない。別の保存先・環境へ案内し、サーバーが鍵を保管する方式へ落とさない。放置pendingは24時間を目安に清掃する。
+PRF非対応しか使えない環境では新規登録を完了させない。別の保存先・環境へ案内し、サーバーが鍵を保管する方式へ落とさない。放置pendingは24時間を目安に清掃する。期限切れ・失効後1日を過ぎたセッション、期限切れ・失効後1日を過ぎたエージェントトークン、期限切れの操作記録も定期清掃で削除する。
 
 ### 5.4 認証と解除の分離
 
@@ -158,9 +160,11 @@ PRF非対応しか使えない環境では新規登録を完了させない。�
 
 Webは`__Host-txt_session`のSecure、HttpOnly、SameSite=Strict、Path=/ Cookieを使い、Domain属性を付けない。WebセッションはCookie認証のみとし、Bearerでは認可せず、レスポンスJSONに生セッショントークンを返さない。唯一の例外はエージェントトークンで認可されるエージェント経路（§6.6、§12.2）であり、その経路ではBearerのみを評価しCookieを評価しない。経路ごとに認可主体を混ぜず、1つのリクエストにCookieとBearerの両方があっても他方で補完しない。既存の非Webセッションやchallengeは利用できない。既存Webセッション、DBスキーマ、暗号形式は維持する。
 
-初期期限は絶対45日・無操作30日。CookieのMax-Ageも同じ絶対期限に合わせる。失効とaccountのauth_epochをサーバーで確認する。機密操作は5分以内のstep-up再認証を要求する。セッション期限と端末内の復号鍵保持期限は別である。
+初期期限は絶対45日・無操作30日。CookieのMax-Ageも同じ絶対期限に合わせる。失効とaccountのauth_epochをサーバーで確認する。機密操作は5分以内のstep-up再認証を要求する。機密操作は、パスキーの追加（options・verify・activate）と失効、復旧キー更新、アカウント削除、エージェントの登録・鍵ラップ・トークン発行・失効である。step-upに使えるのはactiveの資格情報だけで、pending・失効済みの資格情報による再認証を受理しない。復旧scopeのセッションは絶対15分で延長せず、確定時に同じセッションを通常期限のactiveへ昇格してCookieを再発行する。セッション期限と端末内の復号鍵保持期限は別である。
 
 Cookie認証の書き込みは厳密なOriginと`X-Txt-Request: 1`を検証し、CORSで他Originを許可しない。Originのない認証済み書き込みとAuthorizationヘッダーによる認証は拒否し、任意の`X-Client`やUser-AgentでCSRFを迂回させない（いずれもWeb経路の規則。エージェント経路ではブラウザー外クライアントのためOrigin/`X-Txt-Request`を適用せず、トークン必須とレート制限で代替する）。認証前ceremonyにもクライアント束縛とレート制限を適用する。
+
+ブラウザーが送る`Sec-Fetch-Site`が`same-origin`・`none`以外のAPI要求は、GETを含めて認可前に403とする。Bearerを伴わない書き込みでOriginヘッダーがある場合は、認証前ceremonyを含めて許可Originと一致しなければ403とする。レート制限の単位はCloudflareが付与する接続元（IPv6は/64）とし、`X-Forwarded-For`等のクライアント指定値を使わない。エージェント経路は、Bearerを伴う全要求を接続元単位で10分あたり1,200回、有効なトークン単位で10分あたり600回に制限する。パスキーの最終1件を残す判定と失効は1文のSQLで行う。
 
 ## 6. パスキーを使うE2EE
 
@@ -228,7 +232,7 @@ WebのVaultKeyは解除中メモリーだけに置く。再読み込み後はパ
 
 Webは無操作時間や非表示/バックグラウンド滞在時間だけを理由に自動ロックしない。一度解除したページは、放置・バックグラウンド復帰・オフライン中も本文、未同期入力、キャレットを保ち、再読み込みやパスキー操作なしで編集を続けられる。端末保持が使えない場合も、開いているページの解除状態は維持する。サーバーのセッション期限・失効判定と、再読み込み時の端末保持期限は変更しない。認証失効時は未同期入力を保持し、同期に再認証を要求する。利用者が「今すぐロック」またはログアウトを選んだ場合は保護し、時間経過・前面復帰・再読み込みによって自動解除してはならない。WebはOSロックを常に検出できると仮定せず、離席時の保護には手動ロックまたは端末の画面ロックを使う。
 
-ロック時は可能な範囲で暗号化退避し、画面を覆い、再生・進行中の平文応答を止め、Object URLをrevokeし、画面・Web Worker・Service Worker・キューの鍵参照を切る。ログアウトではトークン・保存済み解除鍵も削除する。
+ロック時は可能な範囲で暗号化退避し、画面を覆い、再生・進行中の平文応答を止め、Object URLをrevokeし、画面・Web Worker・Service Worker・キューの鍵参照を切る。暗号Workerは鍵を消去して終了し、解除のたびに作り直す。ダイアログに表示した復旧キー・エージェントトークン・本文の抜粋は、応答後とロック時にDOMから取り除く。ログアウトではトークン・保存済み解除鍵も削除する。
 
 明示ロック・認証失効による保護をIMEのために回避しない。ロックによる入力中断は通常同期と区別し、未確定分を確定済みとして送らない。未同期暗号文は所有者別に隔離して保持し、本人が再認証したときだけ復旧可能にする。退避失敗を隠さない。OS終了直前の入力保存や物理メモリーの完全消去は保証しない。
 
@@ -298,7 +302,7 @@ recoveryAAD = Encode("txt/v1/recovery-vault", accountId,
 
 ### 7.2 復旧の確定
 
-TLS上で送信するのは導出済みRecoveryAuthとaccountId等だけで、RecoverySeedや復旧キー全文を送らない。検証後は復旧専用scopeのセッションを発行し、復旧に必要な鍵ラップ・資格情報追加・確定APIだけを許可する。通常文書APIは確定後に利用する。
+TLS上で送信するのは導出済みRecoveryAuthとaccountId等だけで、RecoverySeedや復旧キー全文を送らない。サーバーは提示されたRecoveryAuthをSHA-256してから保存値と定数時間で比較し、保存値そのものの提示を受理しない。検証後は復旧専用scopeのセッションを発行し、復旧に必要な鍵ラップ・資格情報追加・確定API（GET /session、DELETE /session、GET /keys、POST /recovery/options、POST /recovery/complete）だけを許可する。それ以外は403とし、通常文書APIは確定後に利用する。新しいパスキーの登録は、復旧セッションに対してサーバーが発行した用途`recovery-add`のchallengeに応答したものだけを確定で受理し、challengeは一回限りで消費する。同じ操作IDの再送は、確定済みならchallengeを再消費せずに完了済みと答える。
 
 端末でVaultKeyを開き、新パスキーを登録・試験し、新RecoverySeedの保存確認後に、旧資格情報/セッション失効、auth_epoch更新、復旧情報置換を原子的に確定する。途中で唯一の復旧入口を先に無効にしない。復旧操作IDにより、応答消失後も完了状態を確認できる。
 
@@ -552,7 +556,7 @@ R2公開バケット、r2.dev、公開カスタムドメイン、鍵やBearerを
 
 Service WorkerはMessageChannelと実際のclientIdで解除済み編集面へ結び付け、account/document/session/unlock世代を照合する。他タブの解除鍵へフォールバックしない。clientId等の安全な照合ができない要求は拒否する。停止・再起動後は再ハンドシェイクする。
 
-鍵と復号Responseはメモリーのみ。Cache Storage/HTTPキャッシュへ平文を永続化しない。ロックで当該クライアントのキー・バッファーを破棄し、古いストリームを停止する。復号中キャッシュはチャンク数/バイト数で上限を設け、シーク取消で不要取得を止める。
+鍵と復号Responseはメモリーのみ。Cache Storage/HTTPキャッシュへ平文を永続化しない。Service Workerへ渡す鍵は開いている文書のメディアのfileKeyだけとし、VaultKeyを渡さない。文書に記録されたMIMEは信頼せず、復号した内容をブラウザーへ渡すとき（Object URLのBlob、仮想URLの応答）は§11.1の許可種別だけをその種別で、それ以外を`application/octet-stream`で渡す。仮想URLの応答にはnosniff、`Content-Security-Policy: default-src 'none'; sandbox`、`Cross-Origin-Resource-Policy: same-origin`を付ける。ロックで当該クライアントのキー・バッファーを破棄し、古いストリームを停止する。復号中キャッシュはチャンク数/バイト数で上限を設け、シーク取消で不要取得を止める。
 
 制御開始前に仮想URLで再生しない。Service Workerの更新で未保存エディターを強制reloadしない。旧新プロトコルの不一致は再読み込みの安全な案内へ進め、データを上書きしない。
 
@@ -605,8 +609,8 @@ mediaのdocument_id/client_upload_idをuniqueにする。参照集合の同一�
 | POST /bootstrap | 空文書・鍵ラップ・復旧情報の初期確定 |
 | GET /keys | 認可された資格情報用の鍵ラップ/公開パラメーター |
 | POST /credentials/options・/verify・/activate | 新規パスキーの追加・確認・有効化 |
-| GET /credentials、DELETE /credentials/:id | 自分のパスキー管理 |
-| POST /recovery/start・/complete、PUT /recovery | 復旧・復旧キー更新 |
+| GET /credentials、DELETE /credentials/:id | 自分のパスキー管理（失効はactive+step-up） |
+| POST /recovery/start・/options・/complete、PUT /recovery | 復旧（開始・新パスキー登録のchallenge発行・確定）・復旧キー更新 |
 | GET /document、PUT /document | 暗号文取得・条件付き更新 |
 | POST /media/uploads | 容量予約・multipart開始 |
 | GET /media/uploads/:id | 状態・受理済みパート取得 |
@@ -668,7 +672,9 @@ workers.dev・プレビューの本番到達経路を無効化する。旧Access
 
 静的配信とAPIルーティングの順序を明確にし、APIや`/_local/`がSPAフォールバックでindex.htmlを返さないようにする。Worker先行を使う場合も、旧Access検証を残してログイン画面を塞がない。[S34]
 
-CSPはself中心。script-src/connect-src/worker-srcはself、object-src/base-uri/frame-ancestorsはnone、img/mediaのblobは必要範囲のみ。外部CDNスクリプト、eval、任意インラインスクリプト、解析タグ、セッションリプレイを使わない。nosniff、Referrer-Policy:no-referrerを設定する。
+CSPはself中心。script-src/connect-src/worker-srcはself、object-src/base-uri/frame-ancestorsはnone、img/mediaのblobは必要範囲のみ。外部CDNスクリプト、eval、任意インラインスクリプト、解析タグ、セッションリプレイを使わない。nosniff、Referrer-Policy:no-referrerを設定する。blobはimg-srcだけに許可し、frame-srcはnone、manifest-srcはselfとする。`require-trusted-types-for 'script'`を設定し、許可するポリシーはアプリの`txt`（Service Workerと暗号Workerの同一Origin・ビルド生成URLだけを通す）とエディターの`ProseMirrorClipboard`だけとする。
+
+全応答にHSTS（2年、includeSubDomains）、`X-Frame-Options: DENY`、`Cross-Origin-Opener-Policy: same-origin`、使わない機能を閉じたPermissions-Policy（パスキー、クリップボード書き込み、全画面等の使用機能だけself。ブラウザーが認識しない機能名は列挙しない）を付ける。`Cross-Origin-Resource-Policy: same-origin`はAPI、シェル、スクリプト、スタイル、Service Workerに付け、他サイトが埋め込むOGP画像とホーム画面アイコンには付けない。静的ファイルのヘッダーはビルド時にWorkerと同じ定義から生成し、二重管理しない。本番（httpsのAPP_ORIGIN）は正規ホストだけで応答し、localhostやテスト用ホスト名を受け付けない。診断用の経路や`window`上の検査フックを本番に残さない。
 
 API、暗号文、復号後応答はprivate,no-store。ハッシュ付き公開静的資産だけ長期キャッシュする。Service Worker本体は更新確認を妨げない。外部資産やログへファイル名・本文を漏らさない。
 
@@ -719,6 +725,7 @@ Webのgzip 40KiBは絶対条件から外す。初期表示、入力遅延、暗�
 2. Web基礎: 登録・復旧・セッション、暗号化本文、共通モデル、CAS、暗号化退避。
 3. Web完成: 添付、競合、清掃、IMEと障害注入、セキュリティレビュー、公開設定。
 4. 1.4追加: エージェント接続フェーズ1（読み取り）→フェーズ2（書き込み）、Web UIの二言語対応（§4.7）。
+5. 1.5追加: 認証・復旧・配信の境界強化（§5.3、§5.4、§7.2、§11.6、§14）。
 
 「完成」はWebの対象フェーズの受け入れ条件に合格した状態をいう。ブラウザーのPRF・暗号形式・メディア再生の先行検証は省略しない。
 

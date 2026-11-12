@@ -12,7 +12,6 @@
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
-  CHUNK_PLAIN_BYTES,
   deriveDocumentKey,
   documentAad,
   mediaChunkAad,
@@ -26,7 +25,7 @@ import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src
 interface UnlockMessage {
   type: "unlock";
   /** Raw bytes (preferred) or base64url text. */
-  vaultKey: Uint8Array | string;
+  vaultKey: Uint8Array;
   accountId: string;
   documentId: string;
   keyVersion: number;
@@ -250,12 +249,8 @@ self.addEventListener("message", (event: MessageEvent<Incoming>) => {
     try {
       switch (message.type) {
         case "unlock": {
-          const vaultKey =
-            message.vaultKey instanceof Uint8Array
-              ? message.vaultKey
-              : fromBase64Url(message.vaultKey as string);
           session = {
-            vaultKey,
+            vaultKey: message.vaultKey,
             accountId: message.accountId,
             documentId: message.documentId,
             keyVersion: message.keyVersion,
@@ -264,6 +259,7 @@ self.addEventListener("message", (event: MessageEvent<Incoming>) => {
           break;
         }
         case "lock":
+          session?.vaultKey.fill(0);
           session = null;
           post({ type: "locked" });
           break;

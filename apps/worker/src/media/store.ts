@@ -16,8 +16,8 @@
 
 import { MAX_MEDIA_CIPHER_BYTES } from "../../../../packages/protocol/src/media-limits.ts";
 import type { Env } from "../types.ts";
-import { conflict, notFound, payloadTooLarge, preconditionFailed, rangeNotSatisfiable, unprocessable } from "../errors.ts";
-import { nowMs, randomBytes, uuid, bytesToBase64Url } from "../util.ts";
+import { conflict, notFound, payloadTooLarge, rangeNotSatisfiable, unprocessable } from "../errors.ts";
+import { randomBytes, uuid, bytesToBase64Url } from "../util.ts";
 import { readJson, requireInt, requireString } from "../util.ts";
 
 export function arrayBufferEqual(
@@ -182,14 +182,14 @@ export async function startUpload(
         options.now,
       )
       .run();
-  } catch (error) {
+  } catch {
     // Roll the reservation back so a failed insert cannot leak quota.
     await env.DB.prepare(
       `UPDATE storage_usage SET reserved_bytes = reserved_bytes - ?2 WHERE account_id = ?1`,
     )
       .bind(options.accountId, cipherBytes)
       .run();
-    throw conflict(`upload already exists: ${(error as Error).message}`);
+    throw conflict("upload already exists");
   }
 
   const multipart = await env.MEDIA.createMultipartUpload(objectKey);
@@ -406,8 +406,8 @@ export async function completeUpload(
   });
   try {
     await multipart.complete(parts.filter((p) => p.state === "accepted").map(toEtag));
-  } catch (error) {
-    throw conflict(`R2 complete failed: ${(error as Error).message}`, "R2_COMPLETE_FAILED");
+  } catch {
+    throw conflict("R2 complete failed", "R2_COMPLETE_FAILED");
   }
 
   // Verify the object exists with the expected size before flipping to ready.

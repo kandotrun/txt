@@ -63,12 +63,6 @@ export function normalizeEtag(value: string): string {
   return trimmed.startsWith("W/") ? trimmed.slice(2) : trimmed;
 }
 
-export function ifMatchMatches(header: string | null, row: DocumentRow): boolean {
-  if (!header) return false;
-  // `If-Match: *` and Last Write Wins are explicitly not allowed (spec §10.2).
-  return normalizeEtag(header) === etagFor(row);
-}
-
 export async function loadDocument(env: Env, accountId: string): Promise<DocumentRow | null> {
   return env.DB.prepare(
     `SELECT id, account_id, sync_epoch, revision, encrypted_revision, format_version,

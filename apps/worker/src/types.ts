@@ -14,8 +14,6 @@ export interface Env {
   MEDIA_GRACE_MS: string;
 }
 
-export type ClientKind = "web";
-
 export interface SessionRow {
   token_hash32: ArrayBuffer;
   sid: string;

@@ -12,14 +12,14 @@
 
 <p align="center">
   <a href="https://txt.2-38.com"><img src="https://img.shields.io/badge/website-txt.2--38.com-black" alt="Website"></a>
-  <img src="https://img.shields.io/badge/spec-1.4-blue" alt="Spec 1.4">
+  <img src="https://img.shields.io/badge/spec-1.5-blue" alt="Spec 1.5">
   <img src="https://img.shields.io/badge/auth-passkey%20only-green" alt="Passkey only">
   <img src="https://img.shields.io/badge/encryption-E2EE-brightgreen" alt="E2EE">
 </p>
 
 **txt** は [txt.2-38.com](https://txt.2-38.com) の1枚だけのメモです。タイトルも一覧もありません。開けばすぐ書けて、本文と添付（写真・動画・音声）は端末のブラウザーで暗号化されてから送られるため、サーバーには暗号文しか保存されません。
 
-仕様は [`spec.md`](./spec.md) が実装基準です（仕様版 1.4、Web-only）。このリポジトリは **Webとサーバー（Worker）のみ** を実装します。デスクトップ・スマートフォンのブラウザーから利用でき、ネイティブアプリの導入は不要です。開発ルールは [`AGENTS.md`](./AGENTS.md) を参照してください。
+仕様は [`spec.md`](./spec.md) が実装基準です（仕様版 1.5、Web-only）。このリポジトリは **Webとサーバー（Worker）のみ** を実装します。デスクトップ・スマートフォンのブラウザーから利用でき、ネイティブアプリの導入は不要です。開発ルールは [`AGENTS.md`](./AGENTS.md) を参照してください。
 
 ## ✨ 特長
 

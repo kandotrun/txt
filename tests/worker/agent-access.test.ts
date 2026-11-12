@@ -10,6 +10,7 @@
  */
 
 import { SELF, env } from "cloudflare:test";
+import { AGENT_NETWORK_REQUEST_LIMIT, AGENT_TOKEN_REQUEST_LIMIT } from "../../apps/worker/src/context.ts";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -286,7 +287,7 @@ async function buildPutBody(
 
 async function putDocument(
   token: string,
-  account: SeededAccount,
+  _account: SeededAccount,
   body: Record<string, unknown>,
   etag: string,
   extraHeaders: Record<string, string> = {},
@@ -785,5 +786,45 @@ describe("agent access phase 2 (write)", () => {
     expect(response.status).toBe(401);
     const after = await getDocument(agent.token);
     expect(after.body.revision).toBe(0);
+  });
+});
+
+describe("hardening: agent rate limits", () => {
+  it("spec: one token cannot exceed its request budget, and the limit does not touch other tokens", async () => {
+    const account = await seedAccount();
+    const agent = await enrollAgent(account);
+    const other = await enrollAgent(await seedAccount());
+    await TEST_ENV.DB.prepare(`DELETE FROM rate_limits`).run();
+    expect((await getDocument(agent.token)).status).toBe(200);
+
+    // Spend the rest of this window's budget directly in the limiter table:
+    // the only token bucket that exists is the one the request above created.
+    const spent = await TEST_ENV.DB.prepare(
+      `UPDATE rate_limits SET count = ?1 WHERE bucket LIKE 'agent:token:%'`,
+    ).bind(AGENT_TOKEN_REQUEST_LIMIT).run();
+    expect(spent.meta.changes).toBe(1);
+
+    const limited = await SELF.fetch(`${BASE}/api/v1/document`, {
+      headers: { authorization: `Bearer ${agent.token}` },
+    });
+    expect.soft(limited.status).toBe(429);
+    const envelope = await SELF.fetch(`${BASE}/api/v1/agent/envelope`, {
+      headers: { authorization: `Bearer ${agent.token}` },
+    });
+    expect.soft(envelope.status).toBe(429);
+    expect((await getDocument(other.token)).status).toBe(200);
+  });
+
+  it("spec: repeated invalid tokens from one network are throttled", async () => {
+    const statuses: number[] = [];
+    await TEST_ENV.DB.prepare(`DELETE FROM rate_limits`).run();
+    const attempt = () => SELF.fetch(`${BASE}/api/v1/document`, {
+      headers: { authorization: `Bearer txta1.${b64(random(32))}`, "cf-connecting-ip": "203.0.113.77" },
+    });
+    statuses.push((await attempt()).status);
+    await TEST_ENV.DB.prepare(`UPDATE rate_limits SET count = ?1 WHERE bucket LIKE 'agent:request:%'`)
+      .bind(AGENT_NETWORK_REQUEST_LIMIT).run();
+    statuses.push((await attempt()).status);
+    expect(statuses).toEqual([401, 429]);
   });
 });

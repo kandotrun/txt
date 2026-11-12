@@ -22,7 +22,7 @@ import {
 import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
 import { api } from "./api.ts";
 import { t } from "./i18n.ts";
-import type { KeyEnvelope, RecoveryRecord } from "./api.ts";
+import type { KeyEnvelope } from "./api.ts";
 import { assertCredential, createCredential, WebAuthnError } from "./webauthn.ts";
 
 export const FORMAT_VERSION = 1;
@@ -240,9 +240,8 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
   );
 
   // Register a new passkey for this account and rotate the recovery record.
-  const session = await api.session();
-  const addOptions = await api.credentialAddOptions(await currentUserHandle());
-  void session;
+  const userHandle = await currentUserHandle();
+  const addOptions = await api.recoveryOptions();
   const created = await createCredential(addOptions.options);
 
   const newSeed = randomBytes(32);
@@ -262,7 +261,7 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
   await api.recoveryComplete({
     operationId: crypto.randomUUID(),
     response: created.dto,
-    userHandle: await currentUserHandle(),
+    userHandle,
     envelope,
     recovery: {
       recoveryVersion: newVersion,
@@ -300,8 +299,6 @@ export async function addPasskey(options: {
   const assertion = await assertCredential(stepup.options);
   await api.stepupVerify(assertion.dto);
 
-  const credentials = await api.credentials();
-  void credentials;
   const userHandle = await currentUserHandle();
   const addOptions = await api.credentialAddOptions(userHandle);
   const created = await createCredential(addOptions.options);

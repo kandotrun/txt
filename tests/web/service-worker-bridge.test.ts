@@ -34,7 +34,7 @@ function transport() {
 }
 const payload = (sessionGeneration = 1) => ({
   type: "txt-handshake" as const, sessionGeneration, accountId: "synthetic", documentId: "doc",
-  keyVersion: 1, vaultKey: "synthetic-test-only", media: {},
+  media: {},
 });
 async function flush(): Promise<void> { for (let i = 0; i < 8; i++) await Promise.resolve(); }
 afterEach(() => vi.useRealTimers());

@@ -134,15 +134,6 @@ async function registrationResponse(
     credentialIdBytes,
     cose,
   );
-  const clientDataBytes = decodeBase64Url(clientData);
-  const signature = new Uint8Array(
-    await crypto.subtle.sign(
-      { name: "ECDSA", hash: "SHA-256" },
-      credential.privateKey,
-      concatBytes(authData, new Uint8Array(await crypto.subtle.digest("SHA-256", clientDataBytes))),
-    ),
-  );
-
   return {
     id: credential.credentialId,
     rawId: credential.credentialId,
@@ -295,7 +286,7 @@ async function registerAccount(clientHeaders: Record<string, string> = webHeader
   // 各テストの合成クライアントを分離し、実運用の登録制限は変更しない。
   const registrationHeaders = {
     ...clientHeaders,
-    "cf-connecting-ip": `2001:db8::${(++registrationSequence).toString(16)}`,
+    "cf-connecting-ip": `2001:db8:${(++registrationSequence).toString(16)}::1`,
   };
   const optionsResponse = await postJson("/api/v1/auth/register/options", {}, registrationHeaders);
   expect(optionsResponse.status).toBe(200);
@@ -1322,8 +1313,9 @@ describe("Web-only contract", () => {
     const account = await registerAccount();
     await bootstrapAccount(account);
     const recoveryAuth = randomBytes(32);
+    const stored = new Uint8Array(await crypto.subtle.digest("SHA-256", recoveryAuth as BufferSource));
     await TEST_ENV.DB.prepare(`UPDATE recovery SET auth_hash32 = ?2 WHERE account_id = ?1`)
-      .bind(account.accountId, recoveryAuth).run();
+      .bind(account.accountId, stored).run();
     const response = await postJson("/api/v1/recovery/start", {
       accountId: account.accountId, recoveryAuth: b64url(recoveryAuth),
     }, { "content-type": "application/json" });
@@ -1408,6 +1400,7 @@ describe("credential management", () => {
   it("refuses to remove the last active passkey", async () => {
     const account = await registerAccount();
     await bootstrapAccount(account);
+    expect((await stepUp(account)).status).toBe(200);
     const response = await SELF.fetch(
       `${BASE}/api/v1/credentials/${encodeURIComponent(account.credential.credentialId)}`,
       {
@@ -1416,5 +1409,410 @@ describe("credential management", () => {
       },
     );
     expect(response.status).toBe(409);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Hardening                                                           */
+/* ------------------------------------------------------------------ */
+
+async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource));
+}
+
+/** Re-authenticates the session with one of the account's passkeys. */
+async function stepUp(account: RegisteredAccount, credential = account.credential): Promise<Response> {
+  const options = await postJson("/api/v1/auth/stepup/options", {}, webHeaders, account.cookie);
+  expect(options.status).toBe(200);
+  const body = (await options.json()) as { options: { challenge: string } };
+  const response = await assertionResponse(credential, {
+    challenge: body.options.challenge,
+    rpId: "txt.2-38.com",
+    userHandle: account.userHandle,
+  });
+  return postJson("/api/v1/auth/stepup/verify", { response }, webHeaders, account.cookie);
+}
+
+function bootstrapPayload(credentialId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    bootstrapId: crypto.randomUUID(),
+    credentialId,
+    envelope: {
+      formatVersion: 1,
+      keyVersion: 1,
+      wrapSalt32: b64url(randomBytes(32)),
+      nonce: b64url(randomBytes(12)),
+      wrappedKey: b64url(randomBytes(48)),
+    },
+    recovery: {
+      recoveryVersion: 1,
+      keyVersion: 1,
+      authHash32: b64url(randomBytes(32)),
+      nonce: b64url(randomBytes(12)),
+      wrappedKey: b64url(randomBytes(48)),
+    },
+    document: {
+      documentId: crypto.randomUUID(),
+      formatVersion: 1,
+      keyVersion: 1,
+      nonce: b64url(randomBytes(12)),
+      ciphertext: b64url(randomBytes(64)),
+    },
+    ...overrides,
+  };
+}
+
+/** Starts recovery with a known RecoveryAuth and returns the recovery cookie. */
+async function startRecovery(account: RegisteredAccount): Promise<string> {
+  const recoveryAuth = randomBytes(32);
+  await TEST_ENV.DB.prepare(`UPDATE recovery SET auth_hash32 = ?2 WHERE account_id = ?1`)
+    .bind(account.accountId, await sha256Bytes(recoveryAuth)).run();
+  const response = await postJson("/api/v1/recovery/start", {
+    accountId: account.accountId, recoveryAuth: b64url(recoveryAuth),
+  });
+  expect(response.status).toBe(200);
+  return cookieFrom(response) as string;
+}
+
+async function recoveryCompleteBody(
+  account: RegisteredAccount,
+  credential: TestCredential,
+  challenge: string,
+) {
+  return {
+    operationId: crypto.randomUUID(),
+    response: await registrationResponse(credential, {
+      challenge, rpId: "txt.2-38.com", userHandle: account.userHandle,
+    }),
+    userHandle: b64url(account.userHandle),
+    envelope: {
+      formatVersion: 1,
+      keyVersion: 1,
+      wrapSalt32: b64url(randomBytes(32)),
+      nonce: b64url(randomBytes(12)),
+      wrappedKey: b64url(randomBytes(48)),
+    },
+    recovery: {
+      recoveryVersion: 2,
+      keyVersion: 1,
+      authHash32: b64url(randomBytes(32)),
+      nonce: b64url(randomBytes(12)),
+      wrappedKey: b64url(randomBytes(48)),
+    },
+  };
+}
+
+describe("hardening: recovery", () => {
+  it("spec: accepts the RecoveryAuth whose SHA-256 is stored, and never the stored hash itself", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const recoveryAuth = randomBytes(32);
+    const stored = await sha256Bytes(recoveryAuth);
+    await TEST_ENV.DB.prepare(`UPDATE recovery SET auth_hash32 = ?2 WHERE account_id = ?1`)
+      .bind(account.accountId, stored).run();
+
+    // A leaked database row must not be replayable as the credential.
+    const replayed = await postJson("/api/v1/recovery/start", {
+      accountId: account.accountId, recoveryAuth: b64url(stored),
+    });
+    expect.soft(replayed.status).toBe(404);
+    expect.soft(cookieFrom(replayed)).toBeUndefined();
+
+    const genuine = await postJson("/api/v1/recovery/start", {
+      accountId: account.accountId, recoveryAuth: b64url(recoveryAuth),
+    });
+    expect(genuine.status).toBe(200);
+  });
+
+  it("spec: a recovery session is short-lived and cannot use the document API", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const cookie = await startRecovery(account);
+
+    const session = await SELF.fetch(`${BASE}/api/v1/session`, { headers: { cookie } });
+    const info = (await session.json()) as { scope: string; expiresAt: number };
+    expect.soft(info.scope).toBe("recovery");
+    expect.soft(info.expiresAt - Date.now()).toBeLessThanOrEqual(15 * 60 * 1000);
+
+    const document = await SELF.fetch(`${BASE}/api/v1/document`, { headers: { cookie } });
+    expect.soft(document.status).toBe(403);
+    const keys = await SELF.fetch(`${BASE}/api/v1/keys`, { headers: { cookie } });
+    expect(keys.status).toBe(200);
+  });
+
+  it("spec: completes recovery only with a server-issued, single-use challenge", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const cookie = await startRecovery(account);
+
+    // A challenge the client invented is not a ceremony the server started.
+    const forged = await recoveryCompleteBody(account, await createCredential(), b64url(randomBytes(32)));
+    const rejected = await postJson("/api/v1/recovery/complete", forged, webHeaders, cookie);
+    expect.soft(rejected.status).toBe(400);
+
+    // Only a recovery session can start the ceremony.
+    const wrongScope = await postJson("/api/v1/recovery/options", {}, webHeaders, account.cookie);
+    expect.soft(wrongScope.status).toBe(403);
+
+    const optionsResponse = await postJson("/api/v1/recovery/options", {}, webHeaders, cookie);
+    expect(optionsResponse.status).toBe(200);
+    const { options } = (await optionsResponse.json()) as { options: { challenge: string } };
+    const newCredential = await createCredential();
+    const body = await recoveryCompleteBody(account, newCredential, options.challenge);
+    const completed = await postJson("/api/v1/recovery/complete", body, webHeaders, cookie);
+    expect(completed.status).toBe(201);
+
+    // The retry of the same operation is idempotent...
+    const retry = await postJson("/api/v1/recovery/complete", body, webHeaders, cookie);
+    expect.soft(retry.status).toBe(200);
+
+    // ...the old passkey and the old session are gone, the new one works.
+    const oldSession = await SELF.fetch(`${BASE}/api/v1/session`, { headers: { cookie: account.cookie } });
+    expect.soft(oldSession.status).toBe(401);
+    const rows = await TEST_ENV.DB.prepare(
+      `SELECT credential_id, status FROM credentials WHERE account_id = ?1 ORDER BY status`,
+    ).bind(account.accountId).all<{ credential_id: string; status: string }>();
+    expect(rows.results).toEqual([
+      { credential_id: newCredential.credentialId, status: "active" },
+      { credential_id: account.credential.credentialId, status: "revoked" },
+    ]);
+    const promoted = await SELF.fetch(`${BASE}/api/v1/document`, { headers: { cookie } });
+    expect(promoted.status).toBe(200);
+  });
+});
+
+describe("hardening: bootstrap is a one-time activation", () => {
+  it("spec: an active session cannot replace the recovery record or re-activate a revoked passkey", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const before = await TEST_ENV.DB.prepare(
+      `SELECT recovery_version, auth_hash32 FROM recovery WHERE account_id = ?1`,
+    ).bind(account.accountId).first<{ recovery_version: number; auth_hash32: ArrayBuffer }>();
+    const documentRow = await TEST_ENV.DB.prepare(`SELECT id FROM documents WHERE account_id = ?1`)
+      .bind(account.accountId).first<{ id: string }>();
+
+    // A second, revoked passkey on the same account.
+    const revoked = await createCredential();
+    await TEST_ENV.DB.prepare(
+      `INSERT INTO credentials (credential_id, account_id, public_key, counter, transports,
+          backup_eligible, backup_state, device_type, status, created_at)
+       VALUES (?1, ?2, ?3, 0, '[]', 0, 0, 'singleDevice', 'revoked', ?4)`,
+    ).bind(revoked.credentialId, account.accountId, revoked.publicKeyCose, Date.now()).run();
+
+    const payload = bootstrapPayload(revoked.credentialId);
+    payload.recovery.recoveryVersion = 9;
+    payload.document.documentId = documentRow!.id;
+    const response = await postJson("/api/v1/bootstrap", payload, webHeaders, account.cookie);
+    expect.soft(response.status).toBe(409);
+
+    const after = await TEST_ENV.DB.prepare(
+      `SELECT recovery_version, auth_hash32 FROM recovery WHERE account_id = ?1`,
+    ).bind(account.accountId).first<{ recovery_version: number; auth_hash32: ArrayBuffer }>();
+    expect.soft(after?.recovery_version).toBe(before?.recovery_version);
+    expect.soft(new Uint8Array(after!.auth_hash32)).toEqual(new Uint8Array(before!.auth_hash32));
+    const status = await TEST_ENV.DB.prepare(`SELECT status FROM credentials WHERE credential_id = ?1`)
+      .bind(revoked.credentialId).first<{ status: string }>();
+    expect.soft(status?.status).toBe("revoked");
+    const envelopes = await TEST_ENV.DB.prepare(
+      `SELECT COUNT(*) AS n FROM key_envelopes WHERE credential_id = ?1`,
+    ).bind(revoked.credentialId).first<{ n: number }>();
+    expect(envelopes?.n).toBe(0);
+  });
+});
+
+describe("hardening: step-up", () => {
+  it("spec: adding a passkey requires a recent re-authentication", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const body = { userHandle: b64url(account.userHandle) };
+    const denied = await postJson("/api/v1/credentials/options", body, webHeaders, account.cookie);
+    expect.soft(denied.status).toBe(403);
+    expect.soft(((await denied.json()) as { error: { code: string } }).error.code).toBe("STEPUP_REQUIRED");
+
+    expect((await stepUp(account)).status).toBe(200);
+    const allowed = await postJson("/api/v1/credentials/options", body, webHeaders, account.cookie);
+    expect(allowed.status).toBe(200);
+  });
+
+  it.each(["pending", "revoked"])("spec: a %s passkey cannot satisfy step-up", async (status) => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const other = await createCredential();
+    await TEST_ENV.DB.prepare(
+      `INSERT INTO credentials (credential_id, account_id, public_key, counter, transports,
+          backup_eligible, backup_state, device_type, status, created_at)
+       VALUES (?1, ?2, ?3, 0, '[]', 0, 0, 'singleDevice', ?4, ?5)`,
+    ).bind(other.credentialId, account.accountId, other.publicKeyCose, status, Date.now()).run();
+
+    // Narrowing the ceremony to a non-active passkey is not offered...
+    const narrowed = await postJson(
+      "/api/v1/auth/stepup/options", { credentialId: other.credentialId }, webHeaders, account.cookie,
+    );
+    const narrowedBody = (await narrowed.json()) as { options?: { allowCredentials?: Array<{ id: string }> } };
+    expect.soft((narrowedBody.options?.allowCredentials ?? []).map((entry) => entry.id))
+      .not.toContain(other.credentialId);
+
+    // ...and signing the ordinary challenge with it is refused.
+    const verify = await stepUp(account, other);
+    expect.soft(verify.status).toBe(401);
+    const session = await SELF.fetch(`${BASE}/api/v1/session`, { headers: { cookie: account.cookie } });
+    expect(((await session.json()) as { stepupAt: number | null }).stepupAt).toBeNull();
+  });
+
+  it("spec: starting a step-up ceremony is a guarded cookie write", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const response = await postJson(
+      "/api/v1/auth/stepup/options", {},
+      { "content-type": "application/json", origin: "https://evil.example", "x-txt-request": "1" },
+      account.cookie,
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("spec: revoking a passkey requires an active, re-authenticated session", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const second = await createCredential();
+    await TEST_ENV.DB.prepare(
+      `INSERT INTO credentials (credential_id, account_id, public_key, counter, transports,
+          backup_eligible, backup_state, device_type, status, created_at)
+       VALUES (?1, ?2, ?3, 0, '[]', 0, 0, 'singleDevice', 'active', ?4)`,
+    ).bind(second.credentialId, account.accountId, second.publicKeyCose, Date.now()).run();
+    const revoke = (cookie: string, id: string) =>
+      SELF.fetch(`${BASE}/api/v1/credentials/${encodeURIComponent(id)}`, {
+        method: "DELETE", headers: { ...webHeaders, cookie },
+      });
+
+    expect.soft((await revoke(account.cookie, second.credentialId)).status).toBe(403);
+    const recoveryCookie = await startRecovery(account);
+    expect.soft((await revoke(recoveryCookie, second.credentialId)).status).toBe(403);
+
+    expect((await stepUp(account)).status).toBe(200);
+    // Two concurrent revocations must never leave the account without a passkey.
+    const results = await Promise.all([
+      revoke(account.cookie, second.credentialId),
+      revoke(account.cookie, account.credential.credentialId),
+    ]);
+    expect.soft(results.map((result) => result.status).sort()).toEqual([200, 409]);
+    const active = await TEST_ENV.DB.prepare(
+      `SELECT COUNT(*) AS n FROM credentials WHERE account_id = ?1 AND status = 'active'`,
+    ).bind(account.accountId).first<{ n: number }>();
+    expect(active?.n).toBe(1);
+  });
+});
+
+describe("hardening: login", () => {
+  it("spec: rejects an assertion whose userHandle is not the passkey owner's", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const other = await registerAccount();
+    const options = await postJson("/api/v1/auth/login/options", {});
+    const { options: { challenge } } = (await options.json()) as { options: { challenge: string } };
+    const response = await assertionResponse(account.credential, {
+      challenge, rpId: "txt.2-38.com", userHandle: other.userHandle,
+    });
+    const verify = await postJson("/api/v1/auth/login/verify", { response });
+    expect.soft(verify.status).toBe(401);
+    expect(cookieFrom(verify)).toBeUndefined();
+  });
+
+  it("spec: a failed verification does not echo the verifier's diagnostics", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const options = await postJson("/api/v1/auth/login/options", {});
+    const { options: { challenge } } = (await options.json()) as { options: { challenge: string } };
+    const response = await assertionResponse(account.credential, {
+      challenge, rpId: "evil.example", userHandle: account.userHandle,
+    });
+    const verify = await postJson("/api/v1/auth/login/verify", { response });
+    expect.soft(verify.status).toBe(401);
+    expect(await verify.json()).toEqual({
+      error: { code: "UNAUTHORIZED", message: "authentication verification failed" },
+    });
+  });
+});
+
+describe("hardening: surface", () => {
+  it("spec: has no diagnostic route", async () => {
+    const response = await SELF.fetch(`${BASE}/api/v1/debug/host`);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("hostname");
+  });
+
+  it("spec: API responses carry the isolation headers", async () => {
+    const response = await SELF.fetch(`${BASE}/api/v1/health`);
+    const headers = response.headers;
+    expect.soft(headers.get("strict-transport-security")).toMatch(/max-age=\d{8,}/);
+    expect.soft(headers.get("x-frame-options")).toBe("DENY");
+    expect.soft(headers.get("cross-origin-opener-policy")).toBe("same-origin");
+    expect.soft(headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect.soft(headers.get("permissions-policy")).toContain("camera=()");
+    expect(headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it.each(["cross-site", "same-site"])("spec: refuses a %s browser request to the API", async (site) => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const response = await SELF.fetch(`${BASE}/api/v1/document`, {
+      headers: { cookie: account.cookie, "sec-fetch-site": site },
+    });
+    expect.soft(response.status).toBe(403);
+    const sameOrigin = await SELF.fetch(`${BASE}/api/v1/document`, {
+      headers: { cookie: account.cookie, "sec-fetch-site": "same-origin" },
+    });
+    expect(sameOrigin.status).toBe(200);
+  });
+
+  it("spec: refuses a pre-authentication ceremony from a foreign origin", async () => {
+    const response = await postJson("/api/v1/auth/login/options", {}, {
+      "content-type": "application/json", origin: "https://evil.example",
+    });
+    expect(response.status).toBe(403);
+  });
+
+  it.each([
+    ["/api/v1/auth/register/verify", null],
+    ["/api/v1/auth/login/verify", {}],
+    ["/api/v1/auth/login/verify", { response: "x" }],
+  ])("spec: answers a malformed ceremony body on %s with 400, not 500", async (path, body) => {
+    const response = await postJson(path, body, {
+      ...webHeaders, "cf-connecting-ip": `2001:db8:${(++registrationSequence).toString(16)}::1`,
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("spec: registration opens only on an explicit open switch", async () => {
+    const request = () => new Request(`${BASE}/api/v1/auth/register/options`, {
+      method: "POST",
+      headers: { ...webHeaders, "cf-connecting-ip": `2001:db8:${(++registrationSequence).toString(16)}::1` },
+      body: "{}",
+    });
+    for (const mode of ["closed", "", "Open", "maintenance"]) {
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(request(), { ...(env as unknown as Env), REGISTRATION_MODE: mode }, ctx);
+      expect.soft(response.status, `mode=${JSON.stringify(mode)}`).toBe(409);
+    }
+    const ctx = createExecutionContext();
+    const open = await worker.fetch(request(), { ...(env as unknown as Env), REGISTRATION_MODE: "open" }, ctx);
+    expect(open.status).toBe(200);
+  });
+
+  it("spec: development and test hosts are not served by a production deployment", async () => {
+    for (const host of ["https://txt.test", "https://x.example.invalid", "https://localhost"]) {
+      const response = await SELF.fetch(`${host}/api/v1/health`);
+      expect.soft(response.status, host).toBe(404);
+    }
+  });
+
+  it("spec: rate limits ignore a client-supplied forwarding header", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 32; i++) {
+      const response = await postJson("/api/v1/auth/register/options", {}, {
+        ...webHeaders, "x-forwarded-for": `198.51.100.${i}`,
+      });
+      statuses.push(response.status);
+    }
+    expect(statuses.at(-1)).toBe(429);
   });
 });

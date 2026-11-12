@@ -83,3 +83,26 @@ describe("i18n (browser language detection)", () => {
     expect(mod.getLocale()).toBe("en");
   });
 });
+
+describe("static shell translation", () => {
+  it("spec: every selector the locale switch targets exists in the shell", async () => {
+    const { readFile } = await import("node:fs/promises");
+    const source = await readFile(new URL("../../apps/web/src/app/i18n.ts", import.meta.url), "utf8");
+    const html = await readFile(new URL("../../apps/web/static/index.html", import.meta.url), "utf8");
+    const body = source.slice(source.indexOf("export function applyStaticLocale"));
+    const selectors = [...body.matchAll(/(?:setMeta|setText|setAttr|querySelector)\(\s*(['"])(.+?)\1/g)]
+      .map((match) => match[2] as string);
+    expect(selectors.length).toBeGreaterThan(8);
+
+    const present = (part: string): boolean => {
+      if (part.startsWith("#")) return html.includes(`id="${part.slice(1)}"`);
+      if (part.startsWith(".")) return new RegExp(`class="[^"]*\\b${part.slice(1)}\\b[^"]*"`).test(html);
+      const attribute = /^(\w+)\[(\w+)="([^"]+)"\]$/.exec(part);
+      if (attribute) return new RegExp(`<${attribute[1]}\\s[^>]*${attribute[2]}="${attribute[3]}"`).test(html);
+      return html.includes(`<${part}`);
+    };
+    // A selector that matches nothing leaves that string untranslated (§4.7).
+    const missing = selectors.filter((selector) => !selector.split(/\s+/).every(present));
+    expect(missing).toEqual([]);
+  });
+});

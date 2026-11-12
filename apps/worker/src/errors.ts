@@ -35,5 +35,3 @@ export const preconditionRequired = (message = "precondition required") =>
   new ApiError(428, "PRECONDITION_REQUIRED", message);
 export const tooManyRequests = (message = "rate limited") =>
   new ApiError(429, "TOO_MANY_REQUESTS", message);
-export const serviceUnavailable = (message = "temporarily unavailable") =>
-  new ApiError(503, "SERVICE_UNAVAILABLE", message);

@@ -8,25 +8,15 @@
 import { Hono } from "hono";
 
 import type { AppBindings } from "../context.ts";
-import { enforceRateLimit, clientBucketKey, getAuth, requireAuth } from "../context.ts";
-import type { Env } from "../types.ts";
+import { enforceRateLimit, clientBucketKey, rateLimitScale, requireAuth } from "../context.ts";
 import { badRequest, conflict, notFound, unauthorized } from "../errors.ts";
-import { nowMs, randomBytes, readJson, uuid } from "../util.ts";
+import { nowMs, readJson, uuid } from "../util.ts";
 import { encodeBase64Url } from "../document/store.ts";
 
-/**
- * Rate limits (spec §14): accounts/networks are limited per operation, and the
- * limits can be relaxed in development so repeated local test runs do not
- * exhaust the production budget.
- */
-export function rateLimitScale(env: Env): number {
-  return env.APP_ORIGIN.startsWith("http://") ? 20 : 1;
-}
 import {
   assertWriteRequestAllowed,
   clearSessionCookie,
   issueSession,
-  requireStepUp,
   sessionCookie,
   touchSession,
 } from "../auth/sessions.ts";
@@ -56,10 +46,12 @@ register.post("/register/options", async (c) => {
   const bucketKey = await clientBucketKey(c, "register:options");
   await enforceRateLimit(c, { bucketKey, limit: 30 * rateLimitScale(c.env), windowMs: 60 * 60 * 1000 });
 
-  const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
+  // The body carries nothing we use, but it is still bounded and must parse.
+  await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
   const clientKind = "web";
 
-  if (c.env.REGISTRATION_MODE === "closed") {
+  // Fail closed: only the exact switch value opens registration (spec §14).
+  if (c.env.REGISTRATION_MODE !== "open") {
     throw conflict("registration is closed", "REGISTRATION_CLOSED");
   }
 
@@ -216,12 +208,20 @@ register.post("/login/verify", async (c) => {
     .run();
 
   const account = await c.env.DB.prepare(
-    `SELECT auth_epoch, status FROM accounts WHERE id = ?1`,
+    `SELECT auth_epoch, status, user_handle FROM accounts WHERE id = ?1`,
   )
     .bind(owner)
-    .first<{ auth_epoch: number; status: string }>();
+    .first<{ auth_epoch: number; status: string; user_handle: ArrayBuffer }>();
   if (!account) throw unauthorized("account unavailable");
   if (account.status === "deleting") throw unauthorized("account is being deleted");
+  // The owner comes from the server's credential table; a userHandle the
+  // authenticator reports must name that same account (spec §5.2).
+  if (
+    dto.response.userHandle !== undefined &&
+    dto.response.userHandle !== encodeBase64Url(account.user_handle)
+  ) {
+    throw unauthorized("unknown credential");
+  }
 
   const clientKind = "web";
   const scope = account.status === "pending" ? "pending" : "active";
@@ -232,7 +232,7 @@ register.post("/login/verify", async (c) => {
     authEpoch: account.auth_epoch,
   });
 
-  c.header("set-cookie", sessionCookie(session.token, c.env));
+  c.header("set-cookie", sessionCookie(session.token, c.env, session.maxAgeMs));
   return c.json({
     accountId: owner,
     credentialId,
@@ -244,33 +244,20 @@ register.post("/login/verify", async (c) => {
 /** POST /api/v1/auth/stepup/options — re-authentication for sensitive operations. */
 register.post("/stepup/options", async (c) => {
   const auth = await requireAuth(c);
-  const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024).catch(
-    () => ({}) as Record<string, unknown>,
-  );
+  assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024).catch(() => ({}));
 
-  // Optionally narrow to a single credential (used while adding a passkey).
-  const requestedCredential = typeof body["credentialId"] === "string" ? body["credentialId"] : null;
-  let allowCredentialIds: string[];
-  if (requestedCredential) {
-    const owned = await c.env.DB.prepare(
-      `SELECT credential_id FROM credentials
-        WHERE credential_id = ?1 AND account_id = ?2 AND status = 'pending'`,
-    )
-      .bind(requestedCredential, auth.accountId)
-      .first<{ credential_id: string }>();
-    if (!owned) throw notFound("credential not found");
-    allowCredentialIds = [owned.credential_id];
-  } else {
-    const rows = await c.env.DB.prepare(
-      `SELECT credential_id FROM credentials WHERE account_id = ?1 AND status = 'active'`,
-    )
-      .bind(auth.accountId)
-      .all<{ credential_id: string }>();
-    allowCredentialIds = (rows.results ?? []).map(
-      (row: { credential_id: string }) => row.credential_id,
-    );
-    if (allowCredentialIds.length === 0) throw conflict("no active credentials");
-  }
+  // Only passkeys that are already trusted can re-authenticate: a pending or
+  // revoked one must never be able to vouch for the session (spec §5.4).
+  const rows = await c.env.DB.prepare(
+    `SELECT credential_id FROM credentials WHERE account_id = ?1 AND status = 'active'`,
+  )
+    .bind(auth.accountId)
+    .all<{ credential_id: string }>();
+  const allowCredentialIds = (rows.results ?? []).map(
+    (row: { credential_id: string }) => row.credential_id,
+  );
+  if (allowCredentialIds.length === 0) throw conflict("no active credentials");
 
   const options = await buildLoginOptions(c.env, { allowCredentialIds });
   const binding = await bindingHash(c.req.raw, "stepup");
@@ -278,7 +265,6 @@ register.post("/stepup/options", async (c) => {
     purpose: "stepup",
     challenge: options.challenge,
     accountId: auth.accountId,
-    credentialId: requestedCredential,
     clientKind: auth.clientKind,
     binding,
   });
@@ -306,11 +292,8 @@ register.post("/stepup/verify", async (c) => {
   }
 
   const stored = await loadCredential(c.env, dto.id);
-  if (!stored || stored.account_id !== auth.accountId) {
+  if (!stored || stored.account_id !== auth.accountId || stored.status !== "active") {
     throw unauthorized("credential does not belong to this account");
-  }
-  if (challenge.credential_id && challenge.credential_id !== stored.credential_id) {
-    throw unauthorized("credential does not match the challenge");
   }
 
   const verified = await verifyAuthentication(c.env, {
@@ -320,15 +303,22 @@ register.post("/stepup/verify", async (c) => {
   });
 
   const now = nowMs();
-  await c.env.DB.batch([
+  const results = await c.env.DB.batch([
     c.env.DB.prepare(
       `UPDATE credentials SET counter = ?1, last_used_at = ?2 WHERE credential_id = ?3`,
     ).bind(verified.newCounter, now, stored.credential_id),
-    c.env.DB.prepare(`UPDATE sessions SET stepup_at = ?1 WHERE sid = ?2`).bind(
-      now,
-      auth.session.sid,
-    ),
+    // Guarded in SQL: a passkey revoked between the check and this write
+    // leaves the session without a step-up.
+    c.env.DB.prepare(
+      `UPDATE sessions SET stepup_at = ?1
+        WHERE sid = ?2 AND revoked_at IS NULL
+          AND EXISTS (SELECT 1 FROM credentials
+                       WHERE credential_id = ?3 AND account_id = ?4 AND status = 'active')`,
+    ).bind(now, auth.session.sid, stored.credential_id, auth.accountId),
   ]);
+  if ((results[1]?.meta.changes ?? 0) !== 1) {
+    throw unauthorized("credential does not belong to this account");
+  }
 
   return c.json({ ok: true, stepupAt: now, credentialId: stored.credential_id });
 });
@@ -373,22 +363,3 @@ sessionRoutes.delete("/session", async (c) => {
 });
 
 export const authRoutes = register;
-
-/**
- * Decodes the challenge from clientDataJSON. The value is the original
- * base64url string produced by the server, so it is compared verbatim
- * (padding is optional on the wire but the stored hash uses the raw string).
- */
-function decodedChallenge(clientDataJSON: string): string {
-  const normalized = clientDataJSON.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const parsed = JSON.parse(new TextDecoder().decode(bytes)) as { challenge?: unknown };
-  if (typeof parsed.challenge !== "string") throw badRequest("clientDataJSON has no challenge");
-  return parsed.challenge;
-}
-
-/** Exported for tests and maintenance. */
-export const __authInternals = { randomBytes, uuid, requireStepUp };

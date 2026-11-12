@@ -6,7 +6,9 @@ import type { Context } from "hono";
 import type { Env } from "./types.ts";
 import type { AuthContext } from "./auth/sessions.ts";
 import { ApiError } from "./errors.ts";
-import { resolveSession } from "./auth/sessions.ts";
+import { assertScopeAllowsRoute, isDevelopmentEnv, resolveSession } from "./auth/sessions.ts";
+import type { AgentAuthContext } from "./auth/agent.ts";
+import { requireAgentAuth, touchAgentAuth } from "./auth/agent.ts";
 import { nowMs, sha256, toHex } from "./util.ts";
 import { tooManyRequests } from "./errors.ts";
 
@@ -30,12 +32,33 @@ export async function getAuth(c: AppContext): Promise<AuthContext | null> {
 export async function requireAuth(c: AppContext): Promise<AuthContext> {
   const auth = await getAuth(c);
   if (!auth) throw new ApiError(401, "UNAUTHORIZED", "authentication required");
+  assertScopeAllowsRoute(auth, c.req.raw);
   return auth;
+}
+
+/**
+ * The network a request is counted against. Only Cloudflare's own header is
+ * trusted — anything else is chosen by the client. IPv6 clients control a
+ * whole /64, so that prefix is the unit; without the header (local dev) every
+ * caller shares one bucket.
+ */
+export function clientNetwork(request: Request): string {
+  const ip = request.headers.get("cf-connecting-ip")?.trim() ?? "";
+  if (ip === "") return "unknown";
+  if (!ip.includes(":")) return ip;
+  const [head = "", tail = ""] = ip.toLowerCase().split("::");
+  const groups = head === "" ? [] : head.split(":");
+  if (ip.includes("::")) {
+    const tailGroups = tail === "" ? [] : tail.split(":");
+    while (groups.length + tailGroups.length < 8) groups.push("0");
+    groups.push(...tailGroups);
+  }
+  return groups.slice(0, 4).map((group) => group.replace(/^0+(?=.)/, "")).join(":") + "::/64";
 }
 
 /** Hashed client identifier for rate limiting (raw IPs are never stored). */
 export async function clientBucketKey(c: AppContext, scope: string): Promise<string> {
-  const ip = c.req.header("cf-connecting-ip") ?? c.req.header("x-forwarded-for") ?? "unknown";
+  const ip = clientNetwork(c.req.raw);
   const digest = await sha256(new TextEncoder().encode(`${scope}\n${ip}`));
   return `${scope}:${toHex(digest).slice(0, 32)}`;
 }
@@ -56,4 +79,40 @@ export async function enforceRateLimit(
   if ((updated?.count ?? 0) > options.limit) {
     throw tooManyRequests("too many requests");
   }
+}
+
+/**
+ * Rate limits are relaxed on a local http deployment so repeated test runs do
+ * not exhaust the production budget (spec §14).
+ */
+export function rateLimitScale(env: Env): number {
+  return isDevelopmentEnv(env) ? 20 : 1;
+}
+
+/** Agent requests per 10 minutes: per token, and per network for any Bearer. */
+export const AGENT_TOKEN_REQUEST_LIMIT = 600;
+export const AGENT_NETWORK_REQUEST_LIMIT = 1200;
+const AGENT_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * Authorizes an agent (Bearer) request. The agent path has no Origin or CSRF
+ * check — it is not a browser — so the token and these limits are its whole
+ * defence (spec §5.4): every Bearer attempt counts against its network before
+ * the token is even looked up, and a valid token has its own budget.
+ */
+export async function requireAgent(c: AppContext, scope: string): Promise<AgentAuthContext> {
+  const scale = rateLimitScale(c.env);
+  await enforceRateLimit(c, {
+    bucketKey: await clientBucketKey(c, "agent:request"),
+    limit: AGENT_NETWORK_REQUEST_LIMIT * scale,
+    windowMs: AGENT_WINDOW_MS,
+  });
+  const agent = await requireAgentAuth(c.req.raw, c.env, scope);
+  await enforceRateLimit(c, {
+    bucketKey: `agent:token:${agent.tokenId}`,
+    limit: AGENT_TOKEN_REQUEST_LIMIT * scale,
+    windowMs: AGENT_WINDOW_MS,
+  });
+  await touchAgentAuth(c.env, agent);
+  return agent;
 }

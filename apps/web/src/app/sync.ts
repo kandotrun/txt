@@ -2,7 +2,7 @@
  * Sync engine (spec §10).
  *
  * Separate states rather than a single dirty flag: editGeneration,
- * committedGeneration, inFlightSave, remoteCandidate, persistedGeneration.
+ * committedGeneration, inFlightSave.
  *
  * - 700ms debounce after the last committed change; at most 5s of continuous
  *   committed input before sending (IME safe points take priority, §9.6).
@@ -23,6 +23,7 @@ import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src
 import { ApiRequestError, api } from "./api.ts";
 import type { DocumentResponse } from "./api.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
+import { DraftScheduler } from "./draft-scheduler.ts";
 import { saveDraft, clearDraft } from "./drafts.ts";
 import { t } from "./i18n.ts";
 
@@ -47,8 +48,6 @@ export interface SyncCallbacks {
     remoteResponse: DocumentResponse;
   }) => Promise<"keep-local" | "use-remote" | "pending">;
   isSafePoint: () => boolean;
-  /** Called when the model changed locally and differs from the server copy. */
-  onMediaManifestChanged?: () => void;
 }
 
 /**
@@ -65,6 +64,11 @@ const ACTIVE_POLL_MS = 2500;
 const IDLE_POLL_MS = 15000;
 const IDLE_AFTER_MS = 60000;
 const MAX_BACKOFF_MS = 30000;
+/**
+ * Coalescing window of the encrypted local draft (spec §9.8): the document is
+ * serialised and encrypted at most once per window, not once per keystroke.
+ */
+const DRAFT_WINDOW_MS = 200;
 
 /** Same-browser tab notifications: metadata only, never keys or content. */
 const CHANNEL_NAME = "txt-document";
@@ -82,10 +86,7 @@ export class SyncEngine {
   private baseRevision = -1;
   private editGeneration = 0;
   private committedGeneration = 0;
-  private persistedGeneration = -1;
   private inFlight: { generation: number; mutationId: string; payload: SavePayload } | null = null;
-  private remoteCandidate: { document: DocumentModel; response: DocumentResponse; etag: string } | null =
-    null;
   private debounceTimer: number | null = null;
   private maxWaitTimer: number | null = null;
   private pollTimer: number | null = null;
@@ -95,8 +96,8 @@ export class SyncEngine {
   private stopped = false;
   private syncing = false;
   private dirty = false;
-  private pendingRemoteApply: DocumentModel | null = null;
   private channel: BroadcastChannel | null = null;
+  private readonly drafts: DraftScheduler;
 
   constructor(options: {
     bridge: CryptoBridge;
@@ -117,23 +118,13 @@ export class SyncEngine {
     this.vaultKey = options.vaultKey;
     this.baseEtag = options.baseEtag ?? null;
     this.baseRevision = options.baseRevision ?? -1;
-  }
-
-  /** Initial load. Returns the decrypted document and sets the base ETag. */
-  async load(): Promise<{ document: DocumentModel; etag: string }> {
-    const { data, etag } = await api.document();
-    if (!data) throw new Error(t("文書を取得できません。"));
-    this.baseEtag = etag ?? null;
-    this.baseRevision = data.revision;
-    const document = await this.bridge.decryptDocument({
-      mutationId: data.mutationId,
-      encryptedRevision: data.encryptedRevision,
-      formatVersion: data.formatVersion,
-      keyVersion: data.keyVersion,
-      nonce: data.nonce,
-      ciphertext: data.ciphertext,
+    this.drafts = new DraftScheduler({
+      delayMs: DRAFT_WINDOW_MS,
+      capture: () => this.captureDraft(),
+      // Dropped once the server holds the same content: keeping it would make
+      // every reload ask "未確定の入力が残っています" for saved text (§10.6).
+      clear: () => clearDraft({ accountId: this.accountId, documentId: this.documentId }),
     });
-    return { document, etag: etag ?? "" };
   }
 
   start(): void {
@@ -141,18 +132,31 @@ export class SyncEngine {
     document.addEventListener("visibilitychange", this.onVisibility);
     window.addEventListener("focus", this.onFocus);
     window.addEventListener("online", this.onFocus);
-    window.addEventListener("offline", () => this.callbacks.onState("offline"));
+    window.addEventListener("offline", this.onOffline);
+    window.addEventListener("pagehide", this.onPageHide);
     this.startChannel();
   }
 
   stop(): void {
     this.stopped = true;
     this.clearTimers();
+    // Call persistDraftNow() first when the pending draft must be kept.
+    this.drafts.cancel();
     document.removeEventListener("visibilitychange", this.onVisibility);
     window.removeEventListener("focus", this.onFocus);
     window.removeEventListener("online", this.onFocus);
+    window.removeEventListener("offline", this.onOffline);
+    window.removeEventListener("pagehide", this.onPageHide);
     this.channel?.close();
     this.channel = null;
+  }
+
+  /**
+   * Writes the encrypted local draft now instead of at the end of the
+   * coalescing window (lock, page hidden). Returns once it is stored.
+   */
+  persistDraftNow(): Promise<void> {
+    return this.drafts.flush();
   }
 
   /**
@@ -206,20 +210,12 @@ export class SyncEngine {
     this.lastInteraction = Date.now();
     this.callbacks.onState("local-only");
     this.scheduleSave();
-    void this.persistDraft();
+    this.drafts.noteChange();
   }
 
   /** Marks an uncommitted change (composing) — never synced (§9.6). */
   noteComposingChange(): void {
     this.editGeneration += 1;
-  }
-
-  get hasPendingLocalChanges(): boolean {
-    return this.dirty;
-  }
-
-  get currentGeneration(): number {
-    return this.editGeneration;
   }
 
   /** Save now (Cmd/Ctrl+S): only at a safe point, never forcing IME commit. */
@@ -298,7 +294,6 @@ export class SyncEngine {
       );
       this.baseEtag = result.etag;
       this.baseRevision = result.revision;
-      this.persistedGeneration = generation;
       this.backoffMs = 1000;
       const stillUnsynced = this.committedGeneration !== generation;
       this.callbacks.onState(stillUnsynced ? "saving" : "saved");
@@ -308,8 +303,7 @@ export class SyncEngine {
         this.dirty = false;
         // The server now holds this content: the local draft is no longer a
         // recovery source and must not trigger a confirmation on next load.
-        this.persistedGeneration = generation;
-        void this.clearSyncedDraft();
+        void this.drafts.clear();
         // Tell other tabs in this browser to fetch now instead of waiting for
         // their next poll (spec §10.5).
         this.announceChange();
@@ -319,7 +313,7 @@ export class SyncEngine {
         }, 2000);
       }
     } catch (error) {
-      await this.handleSaveError(error as Error, generation, mutationId);
+      await this.handleSaveError(error as Error, mutationId);
     }
   }
 
@@ -357,14 +351,14 @@ export class SyncEngine {
     };
   }
 
-  private async handleSaveError(error: Error, generation: number, mutationId: string): Promise<void> {
+  private async handleSaveError(error: Error, mutationId: string): Promise<void> {
     if (error instanceof ApiRequestError) {
       if (error.status === 401) {
         this.callbacks.onState("auth-expired", t("再ログインが必要です。"));
         return; // no infinite retry on 401
       }
       if (error.status === 412) {
-        await this.resolvePrecondition(generation, mutationId);
+        await this.resolvePrecondition(mutationId);
         return;
       }
       if (error.status === 409) {
@@ -414,7 +408,7 @@ export class SyncEngine {
   }
 
   /** 412 handling (spec §10.4): compare, then either converge or ask. */
-  private async resolvePrecondition(generation: number, mutationId: string): Promise<void> {
+  private async resolvePrecondition(mutationId: string): Promise<void> {
     this.inFlight = null;
     let remote: { data?: DocumentResponse; etag?: string; notModified: boolean };
     try {
@@ -442,11 +436,6 @@ export class SyncEngine {
       nonce: remote.data.nonce,
       ciphertext: remote.data.ciphertext,
     });
-    this.remoteCandidate = {
-      document: remoteDocument,
-      response: remote.data,
-      etag: remote.etag ?? "",
-    };
 
     const local = this.callbacks.getDocument();
     // Equality is decided on the normalized common model, never on ciphertext
@@ -454,7 +443,6 @@ export class SyncEngine {
     if (normalizedEqual(local, remoteDocument)) {
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.revision;
-      this.persistedGeneration = generation;
       this.dirty = false;
       this.callbacks.onState("saved");
       return;
@@ -470,7 +458,6 @@ export class SyncEngine {
     if (decision === "use-remote") {
       this.baseEtag = remote.etag ?? null;
       this.baseRevision = remote.data.revision;
-      this.persistedGeneration = generation;
       this.dirty = false;
       this.callbacks.applyRemote(remoteDocument, { fromAdoption: true });
       this.callbacks.onState("saved");
@@ -496,12 +483,21 @@ export class SyncEngine {
     if (document.hidden) {
       this.clearPollTimer();
       // Best-effort save when going background; never rely on unload events.
+      void this.drafts.flush();
       if (this.callbacks.isSafePoint()) void this.flush();
       return;
     }
     this.lastInteraction = Date.now();
     void this.refreshRemote();
     this.schedulePoll();
+  };
+
+  private onOffline = (): void => {
+    this.callbacks.onState("offline");
+  };
+
+  private onPageHide = (): void => {
+    void this.drafts.flush();
   };
 
   private onFocus = (): void => {
@@ -552,7 +548,6 @@ export class SyncEngine {
           // The content already converged: adopt the newer base and stop.
           this.baseEtag = result.etag ?? this.baseEtag;
           this.baseRevision = result.data.revision;
-          this.persistedGeneration = this.committedGeneration;
           this.dirty = false;
           this.callbacks.onState("saved");
           return;
@@ -562,7 +557,6 @@ export class SyncEngine {
         // silently overwrite newer remote content — a lost update. Keep the
         // old base instead: the next save fails closed with 412 and goes
         // through the explicit conflict dialog (spec §10.4).
-        this.remoteCandidate = { document: remoteDocument, response: result.data, etag: result.etag ?? "" };
         return;
       }
       this.baseEtag = result.etag ?? this.baseEtag;
@@ -577,18 +571,6 @@ export class SyncEngine {
     }
   }
 
-  /** Adopts the fetched remote version (explicit user decision). */
-  adoptRemoteCandidate(): boolean {
-    if (!this.remoteCandidate) return false;
-    this.callbacks.applyRemote(this.remoteCandidate.document, { fromAdoption: true });
-    this.baseEtag = this.remoteCandidate.etag;
-    this.baseRevision = this.remoteCandidate.response.revision;
-    this.dirty = false;
-    this.remoteCandidate = null;
-    this.callbacks.onState("saved");
-    return true;
-  }
-
   /**
    * Re-bases the next save onto the base a local draft was written against.
    * If the server has moved past that base, the save fails closed with 412
@@ -599,56 +581,27 @@ export class SyncEngine {
     if (baseEtag) this.baseEtag = baseEtag;
   }
 
-  /** Saves the local contents over the fetched remote base. */
-  async saveLocalOverRemote(): Promise<void> {
-    if (!this.remoteCandidate) return;
-    this.baseEtag = this.remoteCandidate.etag;
-    this.baseRevision = this.remoteCandidate.response.revision;
-    this.remoteCandidate = null;
-    this.inFlight = null;
-    this.dirty = true;
-    await this.flush();
-  }
-
   /* ---------------------------------------------------------------- */
   /* Local persistence                                                 */
   /* ---------------------------------------------------------------- */
 
-  private async persistDraft(): Promise<void> {
-    try {
-      const document = this.callbacks.getDocument();
-      await saveDraft({
-        vaultKey: this.vaultKey,
-        accountId: this.accountId,
-        documentId: this.documentId,
-        plaintextDocument: serializeDocument(document),
-        baseEtag: this.baseEtag,
-        mutationId: this.inFlight?.mutationId ?? null,
-        keyVersion: this.keyVersion,
-        provisional: !this.callbacks.isSafePoint(),
-      });
-    } catch {
-      // Local persistence failures are surfaced by the caller's state machine;
-      // an encrypted draft is best effort only (§10.6).
-    }
-  }
-
   /**
-   * Drops the local draft once the server holds the same content.
-   *
-   * Keeping it would make every reload ask "未確定の入力が残っています" for
-   * content that is already saved. The draft exists to protect *unsynced*
-   * input, so it is cleared on a confirmed save (spec §10.6).
+   * Snapshots the document for the local draft. Everything is read
+   * synchronously — the draft must describe the document as it is at this
+   * instant — and only the encryption and the IndexedDB write are deferred.
    */
-  private async clearSyncedDraft(): Promise<void> {
-    try {
-      await clearDraft({
-        accountId: this.accountId,
-        documentId: this.documentId,
-      });
-    } catch {
-      // A leftover draft only costs an extra confirmation, never data.
-    }
+  private captureDraft(): () => Promise<void> {
+    const draft = {
+      vaultKey: this.vaultKey,
+      accountId: this.accountId,
+      documentId: this.documentId,
+      plaintextDocument: serializeDocument(this.callbacks.getDocument()),
+      baseEtag: this.baseEtag,
+      mutationId: this.inFlight?.mutationId ?? null,
+      keyVersion: this.keyVersion,
+      provisional: !this.callbacks.isSafePoint(),
+    };
+    return () => saveDraft(draft);
   }
 }
 

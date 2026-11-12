@@ -232,20 +232,12 @@ export class Editor {
     });
   }
 
-  get editorView(): EditorView {
-    return this.view;
-  }
-
   get state(): EditorState {
     return this.view.state;
   }
 
   get isComposing(): boolean {
     return this.view.composing || this.compositionState === "composing";
-  }
-
-  get inputState(): CompositionState {
-    return this.compositionState;
   }
 
   /** True when it is safe to synchronize or apply a remote version. */
@@ -510,4 +502,3 @@ function buildPlaceholder(mediaId: string): HTMLElement {
   return element;
 }
 
-export { undo, redo };

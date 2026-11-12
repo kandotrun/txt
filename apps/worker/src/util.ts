@@ -51,17 +51,6 @@ export function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function fromHex(hex: string): Uint8Array {
-  if (!/^[0-9a-fA-F]*$/.test(hex) || hex.length % 2 !== 0) {
-    throw new TypeError("fromHex: invalid input");
-  }
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < out.byteLength; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
 /**
  * Reads a JSON request body with a hard byte limit. Throws 400 on malformed
  * JSON, 413 when the body exceeds the limit (including for streaming bodies,
@@ -96,23 +85,17 @@ export async function readJson<T = Record<string, unknown>>(
       reader.releaseLock();
     }
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(new TextDecoder().decode(bytes.subarray(0, length))) as T;
+    parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(0, length)));
   } catch {
     throw badRequest("body must be valid JSON");
   }
-}
-
-export async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array> {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength !== null && Number(contentLength) > maxBytes) {
-    throw new ApiError(413, "PAYLOAD_TOO_LARGE", "request body too large");
+  // Every endpoint takes a JSON object; handlers index into it directly.
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw badRequest("body must be a JSON object");
   }
-  const buffer = await request.arrayBuffer();
-  if (buffer.byteLength > maxBytes) {
-    throw new ApiError(413, "PAYLOAD_TOO_LARGE", "request body too large");
-  }
-  return new Uint8Array(buffer);
+  return parsed as T;
 }
 
 export function requireString(
@@ -131,18 +114,4 @@ export function requireInt(value: unknown, field: string, max = Number.MAX_SAFE_
     throw badRequest(`field ${field} is invalid`);
   }
   return value;
-}
-
-export function parseJsonObject(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw badRequest(`field ${field} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-export function parseTime(value: unknown, field: string): number {
-  if (typeof value !== "string") throw badRequest(`field ${field} must be an ISO timestamp`);
-  const ms = Date.parse(value);
-  if (!Number.isFinite(ms)) throw badRequest(`field ${field} must be an ISO timestamp`);
-  return ms;
 }

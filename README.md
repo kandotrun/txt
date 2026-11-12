@@ -12,14 +12,14 @@
 
 <p align="center">
   <a href="https://txt.2-38.com"><img src="https://img.shields.io/badge/website-txt.2--38.com-black" alt="Website"></a>
-  <img src="https://img.shields.io/badge/spec-1.4-blue" alt="Spec 1.4">
+  <img src="https://img.shields.io/badge/spec-1.5-blue" alt="Spec 1.5">
   <img src="https://img.shields.io/badge/auth-passkey%20only-green" alt="Passkey only">
   <img src="https://img.shields.io/badge/encryption-E2EE-brightgreen" alt="E2EE">
 </p>
 
 **txt** is a single-sheet memo at [txt.2-38.com](https://txt.2-38.com). There are no titles and no lists — open it and write. Text and attachments (photos, videos, audio) are encrypted in your browser before anything leaves the device, so the server only ever stores ciphertext.
 
-The implementation standard is [`spec.md`](./spec.md) (spec version 1.4, Web-only). This repository implements **the Web app and the server (Worker) only** — it works in desktop and mobile browsers, with no native app to install. Development rules live in [`AGENTS.md`](./AGENTS.md).
+The implementation standard is [`spec.md`](./spec.md) (spec version 1.5, Web-only). This repository implements **the Web app and the server (Worker) only** — it works in desktop and mobile browsers, with no native app to install. Development rules live in [`AGENTS.md`](./AGENTS.md).
 
 ## ✨ Features
 

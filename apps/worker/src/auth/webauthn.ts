@@ -25,7 +25,7 @@ import type {
 } from "@simplewebauthn/server";
 
 import type { Env } from "../types.ts";
-import { badRequest, conflict, notFound, unauthorized } from "../errors.ts";
+import { badRequest, conflict, unauthorized } from "../errors.ts";
 import { nowMs, randomBytes, sha256, uuid } from "../util.ts";
 
 export const CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -244,8 +244,10 @@ export async function verifyRegistration(
       expectedRPID: env.WEBAUTHN_RP_ID,
       requireUserVerification: true,
     });
-  } catch (error) {
-    throw badRequest(`registration verification failed: ${(error as Error).message}`);
+  } catch {
+    // The verifier's diagnostics name the exact check that failed; a caller
+    // probing the ceremony gets no such oracle.
+    throw badRequest("registration verification failed");
   }
   if (!verification.verified || !verification.registrationInfo) {
     throw badRequest("registration not verified");
@@ -332,8 +334,8 @@ export async function verifyAuthentication(
         transports: JSON.parse(options.credential.transports || "[]") as AuthenticatorTransport[],
       },
     });
-  } catch (error) {
-    throw unauthorized(`authentication verification failed: ${(error as Error).message}`);
+  } catch {
+    throw unauthorized("authentication verification failed");
   }
   if (!verification.verified) throw unauthorized("authentication not verified");
   return {
@@ -354,10 +356,4 @@ export async function credentialOwner(env: Env, credentialId: string): Promise<s
   if (row.status !== "active") return null;
   if (row.account_status !== "active" && row.account_status !== "pending") return null;
   return row.account_id;
-}
-
-export async function requireCredential(env: Env, credentialId: string): Promise<NonNullable<Awaited<ReturnType<typeof loadCredential>>>> {
-  const row = await loadCredential(env, credentialId);
-  if (!row) throw notFound("credential not found");
-  return row;
 }

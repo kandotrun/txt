@@ -4,6 +4,10 @@
   "main": "apps/worker/src/index.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Spec §14: production is reachable on the custom domain only. Stated
+  // explicitly so a later config change cannot silently reopen either route.
+  "workers_dev": false,
+  "preview_urls": false,
   "assets": {
     "directory": "apps/web/dist",
     "binding": "ASSETS",

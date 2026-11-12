@@ -28,14 +28,6 @@ export class WebAuthnError extends Error {
   }
 }
 
-export function isWebAuthnAvailable(): boolean {
-  if (typeof window === "undefined" || typeof window.PublicKeyCredential === "undefined") {
-    return false;
-  }
-  // Secure contexts only: https, or localhost for development.
-  return location.protocol === "https:" || location.hostname === "localhost";
-}
-
 function toBuffer(source: string): ArrayBuffer {
   const bytes = fromBase64Url(source);
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
@@ -174,7 +166,6 @@ export async function createCredential(
         allowCredentials: [{ id: toBase64Url(new Uint8Array(credential.rawId)), type: "public-key" }],
         userVerification: "required",
       },
-      { returnCredential: true },
     );
     prfOutput = asserted.prfOutput;
     if (!prfOutput) {
@@ -203,7 +194,6 @@ export interface AssertionResult {
  */
 export async function assertCredential(
   optionsJson: PublicKeyCredentialRequestOptionsJSON,
-  flags: { returnCredential?: boolean } = {},
 ): Promise<AssertionResult> {
   let credential: PublicKeyCredential | null;
   try {
@@ -214,26 +204,9 @@ export async function assertCredential(
     throw classifyError(error);
   }
   if (!credential) throw new WebAuthnError("cancelled", t("パスキーの操作が完了しませんでした。"));
-  void flags;
   return {
     prfOutput: readPrfOutput(credential),
     credentialIdRaw: new Uint8Array(credential.rawId),
     dto: credentialToDto(credential),
   };
-}
-
-/** Whether the platform advertises PRF support (necessary, not sufficient). */
-export async function platformSupportsPrf(): Promise<boolean> {
-  if (!isWebAuthnAvailable()) return false;
-  if (typeof PublicKeyCredential.getClientCapabilities === "function") {
-    try {
-      const capabilities = await PublicKeyCredential.getClientCapabilities();
-      return capabilities.prf === true;
-    } catch {
-      // Fall through to the optimistic default; the real check is the actual
-      // PRF output, never the enabled/isSupported flags alone (spec §6.2).
-      return true;
-    }
-  }
-  return true;
 }

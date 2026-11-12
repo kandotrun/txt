@@ -52,8 +52,8 @@ function message(data: unknown, clientId: string | null = CLIENT, postMessage?: 
 function handshake(overrides: Record<string, unknown> = {}, clientId: string | null = CLIENT) {
   message({
     type: "txt-handshake", sessionGeneration: 1,
-    accountId: ACCOUNT, documentId: DOCUMENT, keyVersion: 1,
-    vaultKey: toBase64Url(KEY), media: { [MEDIA]: info }, ...overrides,
+    accountId: ACCOUNT, documentId: DOCUMENT,
+    media: { [MEDIA]: info }, ...overrides,
   }, clientId);
 }
 function request(range?: string, options: { method?: string; clientId?: string; mediaId?: string; signal?: AbortSignal } = {}) {
@@ -572,8 +572,8 @@ describe("spec: bounded authenticated Service Worker media streams", () => {
     listeners.get("message")!({
       data: {
         type: "txt-handshake", sessionGeneration: 17,
-        accountId: ACCOUNT, documentId: DOCUMENT, keyVersion: 1,
-        vaultKey: toBase64Url(KEY), media: { [MEDIA]: info },
+        accountId: ACCOUNT, documentId: DOCUMENT,
+        media: { [MEDIA]: info },
       },
       source: { id: CLIENT }, ports: [{ postMessage }],
     });
@@ -585,5 +585,33 @@ describe("spec: bounded authenticated Service Worker media streams", () => {
     handshake({}, null);
     expect((await request(undefined, { method: "HEAD" })).status).toBe(423);
     expect(fetchCipher).not.toHaveBeenCalled();
+  });
+});
+
+describe("hardening: decrypted responses", () => {
+  it.each([
+    ["text/html", "application/octet-stream"],
+    ["image/svg+xml", "application/octet-stream"],
+    ["application/javascript", "application/octet-stream"],
+    ["VIDEO/MP4", "video/mp4"],
+    ["video/mp4", "video/mp4"],
+  ])("spec: a stored type of %s is served as %s and can never run as a document", async (stored, served) => {
+    info = { ...metadata(1024), mime: stored };
+    handshake();
+    const response = await request(undefined, { method: "HEAD" });
+    expect.soft(response.headers.get("content-type")).toBe(served);
+    expect.soft(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect.soft(response.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect.soft(response.headers.get("cross-origin-resource-policy")).toBe("same-origin");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("spec: the handshake carries no VaultKey", async () => {
+    const source = await (await import("node:fs/promises")).readFile(
+      new URL("../../apps/web/src/app/main.ts", import.meta.url), "utf8",
+    );
+    const handshakeCall = /serviceWorkerBridge\.start\(\{[\s\S]*?\}\)/.exec(source)?.[0] ?? "";
+    expect(handshakeCall).toContain("txt-handshake");
+    expect(handshakeCall).not.toMatch(/vaultKey|keyVersion/);
   });
 });

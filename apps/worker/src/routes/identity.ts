@@ -8,43 +8,40 @@
 
 import { Hono } from "hono";
 
-import type { AppBindings, AppContext } from "../context.ts";
-import { enforceRateLimit, clientBucketKey, requireAuth } from "../context.ts";
-import { assertWriteRequestAllowed } from "../auth/sessions.ts";
+import type { AppBindings } from "../context.ts";
+import { enforceRateLimit, clientBucketKey, rateLimitScale, requireAuth } from "../context.ts";
+import {
+  ABSOLUTE_TTL_MS,
+  IDLE_TTL_MS,
+  assertWriteRequestAllowed,
+  issueSession,
+  readSessionToken,
+  requireStepUp,
+  sessionCookie,
+} from "../auth/sessions.ts";
 import {
   bindingHash,
-  buildLoginOptions,
+  buildRegistrationOptions,
   consumeChallenge,
   loadCredential,
   storeChallenge,
-  verifyAuthentication,
+  verifyRegistration,
 } from "../auth/webauthn.ts";
 import {
   challengeFromClientData,
-  sanitizeAuthenticationResponse,
   sanitizeRegistrationResponse,
 } from "../auth/dto.ts";
 import {
   badRequest,
   conflict,
   notFound,
+  scopeRequired,
   unprocessable,
 } from "../errors.ts";
-import { nowMs, readJson, requireInt, requireString, sha256 } from "../util.ts";
+import { bytesEqual, nowMs, readJson, requireInt, requireString, sha256 } from "../util.ts";
 import { decodeBase64Url, encodeBase64Url } from "../document/store.ts";
 
 const routes = new Hono<AppBindings>();
-
-function decodedChallenge(clientDataJSON: string): string {
-  const normalized = clientDataJSON.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
-  const binary = atob(padded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  const parsed = JSON.parse(new TextDecoder().decode(bytes)) as { challenge?: unknown };
-  if (typeof parsed.challenge !== "string") throw badRequest("clientDataJSON has no challenge");
-  return parsed.challenge;
-}
 
 /* ------------------------------------------------------------------ */
 /* POST /api/v1/bootstrap                                              */
@@ -60,9 +57,6 @@ function decodedChallenge(clientDataJSON: string): string {
 routes.post("/bootstrap", async (c) => {
   const auth = await requireAuth(c);
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
-  if (auth.scope !== "pending" && auth.scope !== "active") {
-    throw unprocessable("bootstrap requires a pending session");
-  }
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 256 * 1024);
   const bootstrapId = requireString(body.bootstrapId, "bootstrapId", 64);
@@ -127,7 +121,20 @@ routes.post("/bootstrap", async (c) => {
     if (existing.state === "completed") {
       return c.json({ ok: true, bootstrapId, documentId, replayed: true });
     }
-  } else {
+  }
+
+  // Bootstrap is the one-time activation of a pending account with its
+  // pending passkey. Once the account is active this endpoint only answers
+  // the replay above: it must never become a way to replace the recovery
+  // record or to re-activate a passkey without a step-up (spec §5.3).
+  const accountRow = await c.env.DB.prepare(`SELECT status FROM accounts WHERE id = ?1`)
+    .bind(auth.accountId)
+    .first<{ status: string }>();
+  if (accountRow?.status !== "pending" || credential.status !== "pending") {
+    throw conflict("account is already activated", "ALREADY_BOOTSTRAPPED");
+  }
+
+  if (!existing) {
     await c.env.DB.prepare(
       `INSERT INTO operations (id, kind, account_id, payload_hash32, state, result, created_at, updated_at)
        VALUES (?1, 'bootstrap', ?2, ?3, 'pending', '{}', ?4, ?4)`,
@@ -147,11 +154,15 @@ routes.post("/bootstrap", async (c) => {
     throw conflict("account already has a document", "DOCUMENT_EXISTS");
   }
 
+  // Every statement re-checks in SQL that the account is still pending when
+  // the batch runs, so a concurrent activation turns the whole batch into a
+  // no-op instead of overwriting what the winner stored.
+  const stillPending = `EXISTS (SELECT 1 FROM accounts WHERE id = ?2 AND status = 'pending')`;
   const statements = [
     c.env.DB.prepare(
       `INSERT INTO key_envelopes
          (credential_id, account_id, format_version, key_version, wrap_salt32, nonce, wrapped_key, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8 WHERE ${stillPending}
        ON CONFLICT(credential_id, key_version) DO NOTHING`,
     ).bind(
       credentialId,
@@ -165,8 +176,8 @@ routes.post("/bootstrap", async (c) => {
     ),
     c.env.DB.prepare(
       `INSERT INTO recovery
-         (account_id, recovery_version, key_version, auth_hash32, nonce, wrapped_key, created_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         (recovery_version, account_id, key_version, auth_hash32, nonce, wrapped_key, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE ${stillPending}
        ON CONFLICT(account_id) DO UPDATE SET
           recovery_version = excluded.recovery_version,
           key_version = excluded.key_version,
@@ -175,8 +186,8 @@ routes.post("/bootstrap", async (c) => {
           wrapped_key = excluded.wrapped_key
         WHERE recovery.recovery_version < excluded.recovery_version`,
     ).bind(
-      auth.accountId,
       recoveryVersion,
+      auth.accountId,
       recoveryKeyVersion,
       authHash,
       recoveryNonce,
@@ -187,7 +198,7 @@ routes.post("/bootstrap", async (c) => {
       `INSERT INTO documents
          (id, account_id, sync_epoch, revision, encrypted_revision, format_version, key_version,
           mutation_id, nonce, ciphertext, last_payload_hash32, updated_at)
-       VALUES (?1, ?2, 1, 0, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+       SELECT ?1, ?2, 1, 0, 0, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE ${stillPending}
        ON CONFLICT(account_id) DO NOTHING`,
     ).bind(
       documentId,
@@ -201,20 +212,30 @@ routes.post("/bootstrap", async (c) => {
       now,
     ),
     c.env.DB.prepare(
-      `UPDATE credentials SET status = 'active' WHERE credential_id = ?1 AND account_id = ?2`,
+      `UPDATE credentials SET status = 'active'
+        WHERE credential_id = ?1 AND account_id = ?2 AND status = 'pending' AND ${stillPending}`,
     ).bind(credentialId, auth.accountId),
     c.env.DB.prepare(
       `UPDATE accounts SET status = 'active', activated_at = ?2 WHERE id = ?1 AND status = 'pending'`,
     ).bind(auth.accountId, now),
     c.env.DB.prepare(
-      `UPDATE sessions SET scope = 'active' WHERE account_id = ?1 AND scope = 'pending'`,
+      `UPDATE sessions SET scope = 'active'
+        WHERE account_id = ?1 AND scope = 'pending'
+          AND EXISTS (SELECT 1 FROM accounts WHERE id = ?1 AND status = 'active')`,
     ).bind(auth.accountId),
+    // Completed only if this very bootstrap stored the document: the initial
+    // mutationId is the bootstrapId (spec §5.3).
     c.env.DB.prepare(
-      `UPDATE operations SET state = 'completed', result = ?2, updated_at = ?3 WHERE id = ?1`,
-    ).bind(bootstrapId, JSON.stringify({ documentId }), now),
+      `UPDATE operations SET state = 'completed', result = ?2, updated_at = ?3
+        WHERE id = ?1
+          AND EXISTS (SELECT 1 FROM documents WHERE account_id = ?4 AND mutation_id = ?1)`,
+    ).bind(bootstrapId, JSON.stringify({ documentId }), now, auth.accountId),
   ];
 
   const results = await c.env.DB.batch(statements);
+  if ((results[4]?.meta.changes ?? 0) !== 1) {
+    throw conflict("account is already activated", "ALREADY_BOOTSTRAPPED");
+  }
   const envelopeChanges = results[0]?.meta.changes ?? 0;
   if (envelopeChanges !== 1) {
     throw conflict("a VaultKey envelope already exists for this credential");
@@ -306,6 +327,7 @@ routes.post("/credentials/options", async (c) => {
   const auth = await requireAuth(c);
   if (auth.scope !== "active") throw unprocessable("active session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  requireStepUp(auth);
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
   const userHandleRaw = body.userHandle;
@@ -335,7 +357,6 @@ routes.post("/credentials/options", async (c) => {
     .all<{ credential_id: string }>();
 
   // Build registration options with the same random-label policy.
-  const { buildRegistrationOptions } = await import("../auth/webauthn.ts");
   const options = await buildRegistrationOptions(c.env, {
     accountId: auth.accountId,
     userHandle: storedHandle,
@@ -360,8 +381,9 @@ routes.post("/credentials/verify", async (c) => {
   const auth = await requireAuth(c);
   if (auth.scope !== "active") throw unprocessable("active session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  requireStepUp(auth);
   const bucketKey = await clientBucketKey(c, "credential:verify");
-  await enforceRateLimit(c, { bucketKey, limit: 60 * (c.env.APP_ORIGIN.startsWith("http://") ? 20 : 1), windowMs: 60 * 60 * 1000 });
+  await enforceRateLimit(c, { bucketKey, limit: 60 * rateLimitScale(c.env), windowMs: 60 * 60 * 1000 });
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 64 * 1024);
   const dto = sanitizeRegistrationResponse(body["response"] as Record<string, unknown>);
@@ -375,7 +397,6 @@ routes.post("/credentials/verify", async (c) => {
     throw badRequest("challenge does not belong to this account");
   }
 
-  const { verifyRegistration } = await import("../auth/webauthn.ts");
   const verified = await verifyRegistration(c.env, {
     response: dto,
     expectedChallenge: challengeFromClientData(dto.response.clientDataJSON),
@@ -413,6 +434,7 @@ routes.post("/credentials/activate", async (c) => {
   const auth = await requireAuth(c);
   if (auth.scope !== "active") throw unprocessable("active session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  requireStepUp(auth);
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 256 * 1024);
   const credentialId = requireString(body.credentialId, "credentialId", 1024);
@@ -495,30 +517,35 @@ routes.post("/credentials/activate", async (c) => {
 
 /**
  * DELETE /api/v1/credentials/:id — revokes a passkey.
- * Refuses to remove the last active credential (spec §7).
+ * Requires a step-up, and refuses to remove the last active credential
+ * (spec §7).
  */
 routes.delete("/credentials/:id", async (c) => {
   const auth = await requireAuth(c);
+  if (auth.scope !== "active") throw scopeRequired("active session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  requireStepUp(auth);
   const credentialId = c.req.param("id");
 
   const target = await loadCredential(c.env, credentialId);
   if (!target || target.account_id !== auth.accountId) throw notFound("credential not found");
 
-  const remaining = await c.env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM credentials WHERE account_id = ?1 AND status = 'active' AND credential_id != ?2`,
-  )
-    .bind(auth.accountId, credentialId)
-    .first<{ n: number }>();
-  if ((remaining?.n ?? 0) === 0 && target.status === "active") {
-    throw conflict("cannot remove the last active passkey", "LAST_CREDENTIAL");
-  }
-
-  await c.env.DB.prepare(
-    `UPDATE credentials SET status = 'revoked' WHERE credential_id = ?1 AND account_id = ?2`,
+  // One statement decides and writes: two concurrent revocations can never
+  // both pass a separate "is another passkey left?" read.
+  const revoked = await c.env.DB.prepare(
+    `UPDATE credentials SET status = 'revoked'
+      WHERE credential_id = ?1 AND account_id = ?2 AND status IN ('active','pending')
+        AND (status != 'active' OR EXISTS (
+              SELECT 1 FROM credentials other
+               WHERE other.account_id = ?2 AND other.status = 'active'
+                 AND other.credential_id != ?1))`,
   )
     .bind(credentialId, auth.accountId)
     .run();
+  if ((revoked.meta.changes ?? 0) !== 1) {
+    if (target.status === "revoked") return c.json({ ok: true });
+    throw conflict("cannot remove the last active passkey", "LAST_CREDENTIAL");
+  }
   return c.json({ ok: true });
 });
 
@@ -532,7 +559,7 @@ routes.delete("/credentials/:id", async (c) => {
  */
 routes.post("/recovery/start", async (c) => {
   const bucketKey = await clientBucketKey(c, "recovery:start");
-  await enforceRateLimit(c, { bucketKey, limit: 20 * (c.env.APP_ORIGIN.startsWith("http://") ? 20 : 1), windowMs: 60 * 60 * 1000 });
+  await enforceRateLimit(c, { bucketKey, limit: 20 * rateLimitScale(c.env), windowMs: 60 * 60 * 1000 });
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024);
   const accountId = requireString(body.accountId, "accountId", 64);
@@ -547,19 +574,17 @@ routes.post("/recovery/start", async (c) => {
     .first<{ auth_hash32: ArrayBuffer; recovery_version: number; key_version: number }>();
   if (!row) throw notFound("recovery not found");
 
-  const given = new Uint8Array(recoveryAuth);
-  const stored = new Uint8Array(row.auth_hash32);
-  let diff = stored.byteLength === given.byteLength ? 0 : 1;
-  const len = Math.min(stored.byteLength, given.byteLength);
-  for (let i = 0; i < len; i++) diff |= (stored[i] as number) ^ (given[i] as number);
-  if (diff !== 0) throw notFound("recovery not found");
+  // The database keeps SHA-256(RecoveryAuth) (spec §7.1): what is presented
+  // is hashed before the comparison, so a copy of the stored row is not a
+  // credential.
+  const given = await sha256(new Uint8Array(recoveryAuth));
+  if (!bytesEqual(new Uint8Array(row.auth_hash32), given)) throw notFound("recovery not found");
 
   const account = await c.env.DB.prepare(`SELECT auth_epoch, status FROM accounts WHERE id = ?1`)
     .bind(accountId)
     .first<{ auth_epoch: number; status: string }>();
   if (!account || account.status === "deleting") throw notFound("recovery not found");
 
-  const { issueSession } = await import("../auth/sessions.ts");
   const clientKind = "web";
   const session = await issueSession(c.env, {
     accountId,
@@ -577,8 +602,7 @@ routes.post("/recovery/start", async (c) => {
     ? encodeBase64Url(accountRow.user_handle)
     : null;
 
-  const { sessionCookie } = await import("../auth/sessions.ts");
-  c.header("set-cookie", sessionCookie(session.token, c.env));
+  c.header("set-cookie", sessionCookie(session.token, c.env, session.maxAgeMs));
   return c.json({
     scope: "recovery",
     recoveryVersion: row.recovery_version,
@@ -589,13 +613,50 @@ routes.post("/recovery/start", async (c) => {
 });
 
 /**
+ * POST /api/v1/recovery/options — starts registering the replacement passkey.
+ * Only a recovery session can ask, and the challenge is bound to its account
+ * and consumed once by /recovery/complete (spec §5.2, §7.2).
+ */
+routes.post("/recovery/options", async (c) => {
+  const auth = await requireAuth(c);
+  if (auth.scope !== "recovery") throw scopeRequired("recovery session required");
+  assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
+  await readJson<Record<string, unknown>>(c.req.raw, 16 * 1024).catch(() => ({}));
+
+  const account = await c.env.DB.prepare(`SELECT user_handle FROM accounts WHERE id = ?1`)
+    .bind(auth.accountId)
+    .first<{ user_handle: ArrayBuffer }>();
+  if (!account) throw notFound("account not found");
+  const existing = await c.env.DB.prepare(
+    `SELECT credential_id FROM credentials WHERE account_id = ?1 AND status IN ('active','pending')`,
+  )
+    .bind(auth.accountId)
+    .all<{ credential_id: string }>();
+
+  const options = await buildRegistrationOptions(c.env, {
+    accountId: auth.accountId,
+    userHandle: new Uint8Array(account.user_handle),
+    existingCredentialIds: (existing.results ?? []).map(
+      (row: { credential_id: string }) => row.credential_id,
+    ),
+  });
+  await storeChallenge(c.env, {
+    purpose: "recovery-add",
+    challenge: options.challenge,
+    accountId: auth.accountId,
+    clientKind: auth.clientKind,
+    binding: await bindingHash(c.req.raw, "recovery-add"),
+  });
+  return c.json({ options });
+});
+
+/**
  * POST /api/v1/recovery/complete — finishes recovery: the new passkey is
  * registered and activated, the old credentials/sessions are revoked and the
  * recovery record is replaced, atomically (spec §7.2).
  */
 routes.post("/recovery/complete", async (c) => {
   const auth = await requireAuth(c);
-  if (auth.scope !== "recovery") throw unprocessable("recovery session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 256 * 1024);
@@ -638,37 +699,48 @@ routes.post("/recovery/complete", async (c) => {
   const recoveryWrapped = decodeBase64Url(newRecovery.wrappedKey, "recovery.wrappedKey");
   if (recoveryWrapped.byteLength !== 48) throw unprocessable("recovery.wrappedKey must be 48 bytes");
 
-  // Registration verification still applies: the new passkey must be an
-  // actual, signed WebAuthn registration for this RP.
-  const { verifyRegistration } = await import("../auth/webauthn.ts");
-  const verified = await verifyRegistration(c.env, {
-    response: dto,
-    expectedChallenge: challengeFromClientData(dto.response.clientDataJSON),
-  });
+  // The session cookie is re-issued with the full lifetime once the session
+  // is promoted; the token itself does not change.
+  const sessionToken = readSessionToken(c.req.raw, c.env)?.token ?? "";
+  const promotedCookie = sessionCookie(sessionToken, c.env);
 
+  // A retry after a lost response is answered from the operation record. By
+  // then this session is already `active`, so the replay check comes before
+  // the scope check — and is scoped to the caller's own account.
   const payloadHash = await sha256(
     new TextEncoder().encode(JSON.stringify({ operationId, response: dto, envelope, newRecovery })),
   );
   const existingOp = await c.env.DB.prepare(
-    `SELECT id, payload_hash32 FROM operations WHERE id = ?1 AND kind = 'recovery'`,
+    `SELECT payload_hash32, state FROM operations
+      WHERE id = ?1 AND kind = 'recovery' AND account_id = ?2`,
   )
-    .bind(operationId)
-    .first<{ id: string; payload_hash32: ArrayBuffer }>();
+    .bind(operationId, auth.accountId)
+    .first<{ payload_hash32: ArrayBuffer; state: string }>();
   if (existingOp) {
-    const left = new Uint8Array(existingOp.payload_hash32);
-    const right = payloadHash;
-    let same = left.byteLength === right.byteLength;
-    if (same) {
-      for (let i = 0; i < left.byteLength; i++) {
-        if (left[i] !== right[i]) {
-          same = false;
-          break;
-        }
-      }
+    if (!bytesEqual(new Uint8Array(existingOp.payload_hash32), payloadHash)) {
+      throw conflict("operationId reused with a different payload");
     }
-    if (!same) throw conflict("operationId reused with a different payload");
-    return c.json({ ok: true, operationId, replayed: true });
+    if (existingOp.state === "completed") {
+      c.header("set-cookie", promotedCookie);
+      return c.json({ ok: true, operationId, replayed: true });
+    }
   }
+  if (auth.scope !== "recovery") throw scopeRequired("recovery session required");
+
+  // The registration must answer a challenge this server issued to this
+  // recovery session, exactly once (spec §5.2).
+  const challenge = await consumeChallenge(c.env, {
+    purpose: "recovery-add",
+    responseClientDataJSON: dto.response.clientDataJSON,
+    binding: await bindingHash(c.req.raw, "recovery-add"),
+  });
+  if (challenge.account_id !== auth.accountId) {
+    throw badRequest("challenge does not belong to this account");
+  }
+  const verified = await verifyRegistration(c.env, {
+    response: dto,
+    expectedChallenge: challengeFromClientData(dto.response.clientDataJSON),
+  });
 
   const now = nowMs();
   const nextEpoch = account.auth_epoch + 1;
@@ -727,20 +799,23 @@ routes.post("/recovery/complete", async (c) => {
     ).bind(auth.accountId, verified.credentialId),
     c.env.DB.prepare(
       `UPDATE sessions SET revoked_at = ?2
-        WHERE account_id = ?1 AND scope != 'recovery'`,
-    ).bind(auth.accountId, now),
+        WHERE account_id = ?1 AND sid != ?3 AND revoked_at IS NULL`,
+    ).bind(auth.accountId, now, auth.session.sid),
     c.env.DB.prepare(`UPDATE accounts SET auth_epoch = ?2 WHERE id = ?1`).bind(
       auth.accountId,
       nextEpoch,
     ),
     c.env.DB.prepare(
-      `UPDATE sessions SET auth_epoch = ?2, scope = 'active' WHERE sid = ?1`,
-    ).bind(auth.session.sid, nextEpoch),
+      `UPDATE sessions SET auth_epoch = ?2, scope = 'active',
+              absolute_expires_at = ?3, idle_expires_at = ?4
+        WHERE sid = ?1`,
+    ).bind(auth.session.sid, nextEpoch, now + ABSOLUTE_TTL_MS, now + IDLE_TTL_MS),
     c.env.DB.prepare(
       `UPDATE operations SET state = 'completed', result = ?2, updated_at = ?3 WHERE id = ?1`,
     ).bind(operationId, JSON.stringify({ credentialId: verified.credentialId }), now),
   ]);
 
+  c.header("set-cookie", promotedCookie);
   return c.json({ ok: true, operationId, credentialId: verified.credentialId }, 201);
 });
 
@@ -752,7 +827,6 @@ routes.put("/recovery", async (c) => {
   const auth = await requireAuth(c);
   if (auth.scope !== "active") throw unprocessable("active session required");
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
-  const { requireStepUp } = await import("../auth/sessions.ts");
   requireStepUp(auth);
 
   const body = await readJson<Record<string, unknown>>(c.req.raw, 64 * 1024);
@@ -798,5 +872,3 @@ routes.get("/operations/:id", async (c) => {
 });
 
 export const identityRoutes = routes;
-export const __identityInternals = { decodedChallenge, buildLoginOptions, verifyAuthentication };
-export type { AppContext };

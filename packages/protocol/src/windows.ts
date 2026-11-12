@@ -13,6 +13,11 @@
  */
 export const SESSION_ABSOLUTE_TTL_MS = 45 * 24 * 60 * 60 * 1000;
 export const SESSION_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * A recovery-scoped session only has to cover one recovery ceremony (spec
+ * §7.2); it never slides.
+ */
+export const RECOVERY_SESSION_TTL_MS = 15 * 60 * 1000;
 /** Sensitive operations always require a ceremony within this window. */
 export const STEPUP_TTL_MS = 5 * 60 * 1000;
 

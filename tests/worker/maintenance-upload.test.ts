@@ -267,3 +267,80 @@ describe("stale upload GC reservation and cleanup persistence", () => {
   });
 
 });
+
+describe("hardening: account deletion", () => {
+  it("spec: removes every ciphertext object of a deleted account, however many there are", async () => {
+    const total = 230;
+    const keys: string[] = [];
+    const statements: D1PreparedStatement[] = [];
+    for (let index = 0; index < total; index++) {
+      const id = crypto.randomUUID();
+      const key = `cipher/${id}`;
+      keys.push(key);
+      await real.MEDIA.put(key, new Uint8Array([index % 251]));
+      statements.push(real.DB.prepare(
+        `INSERT INTO media (id, document_id, account_id, object_key, state, cipher_bytes, crypto_format,
+            chunk_bytes, client_upload_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'ready', 1, 1, 1048592, ?1, ?5)`,
+      ).bind(id, documentId, accountId, key, Date.now()));
+    }
+    await real.DB.batch(statements);
+    await real.DB.prepare(`UPDATE accounts SET status = 'deleting' WHERE id = ?1`).bind(accountId).run();
+
+    await runMaintenance(real);
+
+    const remaining = (await Promise.all(keys.map((key) => real.MEDIA.head(key)))).filter(Boolean);
+    expect.soft(remaining).toHaveLength(0);
+    expect.soft(await real.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE account_id = ?1`)
+      .bind(accountId).first()).toEqual({ n: 0 });
+    expect(await real.DB.prepare(`SELECT id FROM accounts WHERE id = ?1`).bind(accountId).first()).toBeNull();
+  });
+
+  it("spec: keeps the account while any ciphertext object could not be removed", async () => {
+    const id = crypto.randomUUID();
+    await real.DB.prepare(
+      `INSERT INTO media (id, document_id, account_id, object_key, state, cipher_bytes, crypto_format,
+            chunk_bytes, client_upload_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'ready', 1, 1, 1048592, ?1, ?5)`,
+    ).bind(id, documentId, accountId, `cipher/${id}`, Date.now()).run();
+    await real.DB.prepare(`UPDATE accounts SET status = 'deleting' WHERE id = ?1`).bind(accountId).run();
+    const failing = { ...real, MEDIA: new Proxy(real.MEDIA, { get(target, key) {
+      if (key === "delete") return async () => { throw new Error("R2 unavailable"); };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    } }) } as Env;
+
+    await runMaintenance(failing);
+
+    expect.soft(await real.DB.prepare(`SELECT status FROM accounts WHERE id = ?1`).bind(accountId).first())
+      .toEqual({ status: "deleting" });
+    expect(await real.DB.prepare(`SELECT COUNT(*) AS n FROM media WHERE account_id = ?1`)
+      .bind(accountId).first()).toEqual({ n: 1 });
+  });
+});
+
+describe("hardening: expired credentials at rest", () => {
+  it("spec: purges sessions that can never be used again and keeps live ones", async () => {
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    const insert = (sid: string, absolute: number, idle: number, revoked: number | null) =>
+      real.DB.prepare(
+        `INSERT INTO sessions (token_hash32, sid, account_id, client_kind, scope, auth_epoch, created_at,
+            absolute_expires_at, idle_expires_at, revoked_at)
+         VALUES (?1, ?2, ?3, 'web', 'active', 0, ?4, ?5, ?6, ?7)`,
+      ).bind(crypto.getRandomValues(new Uint8Array(32)), sid, accountId, now - 60 * day, absolute, idle, revoked);
+    await real.DB.batch([
+      insert("live", now + day, now + day, null),
+      insert("expired-absolute", now - 2 * day, now + day, null),
+      insert("expired-idle", now + day, now - 2 * day, null),
+      insert("revoked-long-ago", now + day, now + day, now - 2 * day),
+      insert("revoked-just-now", now + day, now + day, now - 1000),
+    ]);
+
+    await runMaintenance(real);
+
+    const left = await real.DB.prepare(`SELECT sid FROM sessions WHERE account_id = ?1 ORDER BY sid`)
+      .bind(accountId).all<{ sid: string }>();
+    expect(left.results.map((row) => row.sid)).toEqual(["live", "revoked-just-now"]);
+  });
+});
