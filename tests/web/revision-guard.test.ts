@@ -170,4 +170,41 @@ describe("RevisionGuard", () => {
     expect(pageB.accepts(5)).toBe(true);
     expect(storage.data.get(`txt.seen.${DOC}`)).toBe("4");
   });
+
+  it("spec: a raise still waiting for the lock does not undo a reset to a copy above the old stored mark", () => {
+    const waiting: Array<() => void> = [];
+    const locks = {
+      request: (_name: string, callback: () => void | Promise<void>) =>
+        new Promise<void>((resolve) => { waiting.push(() => { void callback(); resolve(); }); }),
+    };
+    const storage = memoryStorage();
+    const page = new RevisionGuard(DOC, storage, locks);
+    page.record(5);
+    waiting.shift()!();
+    page.record(10); // queued, not yet granted; the store still says 5
+    page.reset(7); // the user chose to open r7: lower than 10, higher than 5
+    for (const grant of waiting.splice(0)) grant();
+    expect.soft(storage.data.get(`txt.seen.${DOC}`)).toBe("7");
+    expect(page.accepts(7)).toBe(true);
+  });
+
+  it("spec: a raise that could not be stored does not blind the page to another tab's mark", () => {
+    const data = new Map<string, string>();
+    let failing = true;
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (failing) throw new Error("quota");
+        data.set(key, value);
+      },
+    };
+    const page = new RevisionGuard(DOC, storage);
+    page.record(7); // cannot be stored; the page itself still remembers it
+    expect.soft(page.accepts(6)).toBe(false);
+    failing = false;
+    data.set(`txt.seen.${DOC}`, "12"); // another tab opened r12
+    expect.soft(page.accepts(10)).toBe(false);
+    page.record(13);
+    expect(data.get(`txt.seen.${DOC}`)).toBe("13");
+  });
 });

@@ -58,7 +58,8 @@ function harness(players: Player[] = []) {
       return holdMetadata && media.uploaded ? metadataAck.promise : Promise.resolve(true);
     } }, mediaReady: Promise.resolve(true), HTMLMediaElement: Player,
     AbortController, DOMException, crypto: { randomUUID: () => "placeholder" },
-    window: { setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms) }, Promise,
+    window: { setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms) }, Promise, Error,
+    t: (text: string) => text,
     classify: () => "video", renderAttachProgress: vi.fn(), toast,
     uploadFile: (options: { onStarted: (id: string) => void }) => {
       options.onStarted("uploaded");
@@ -144,6 +145,38 @@ describe("main attachment cancellation and stream materialization", () => {
     await pending;
     expect(h.insertMedia).toHaveBeenCalledExactlyOnceWith("uploaded", "video", 2);
     expect(h.noteCommittedChange).toHaveBeenCalledOnce();
+  });
+
+  it("spec: an upload cancelled while it waits for the composition to end is never inserted", async () => {
+    const h = harness();
+    h.composing.active = true;
+    const pending = h.attachFiles([{}], 2);
+    h.completion.resolve({ mediaId: "uploaded", info });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    h.cancel();
+    h.composing.active = false;
+    await pending;
+    await flush();
+    expect(h.insertMedia).not.toHaveBeenCalled();
+    expect(h.noteCommittedChange).not.toHaveBeenCalled();
+    expect(h.state.document.media.uploaded).toBeUndefined();
+    expect(h.toast).not.toHaveBeenCalled();
+  });
+
+  it("spec: an upload overtaken by a remote copy while it waits for the composition is reported, not inserted", async () => {
+    const h = harness();
+    h.composing.active = true;
+    const pending = h.attachFiles([{}], 2);
+    h.completion.resolve({ mediaId: "uploaded", info });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    // Another device's copy replaced the document: it knows nothing of this upload.
+    h.state.document = { media: { existing: info } };
+    h.composing.active = false;
+    await pending;
+    expect(h.insertMedia).not.toHaveBeenCalled();
+    expect(h.noteCommittedChange).not.toHaveBeenCalled();
+    expect(h.toast).toHaveBeenCalledOnce();
+    expect(h.state.attaching.size).toBe(0);
   });
 
   it("preserves an unchanged playing stream-backed node across unrelated metadata ACKs", async () => {

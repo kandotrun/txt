@@ -58,15 +58,20 @@ routes.get("/document", async (c) => {
     return c.json({ error: { code: "NOT_FOUND", message: "document not found" } }, 404);
   }
 
-  // Body and reference set are read in a single consistent snapshot: both come
-  // from the same row, and references are only ever written with the CAS.
+  // The reference list is informational: clients derive the references from
+  // the document they decrypt. It is read after the row, so a save landing in
+  // between can put it one revision ahead of the body.
   const references = await c.env.DB.prepare(
     `SELECT media_id FROM document_media WHERE document_id = ?1 ORDER BY media_id`,
   )
     .bind(row.id)
     .all<{ media_id: string }>();
 
-  c.header("etag", etag);
+  // The ETag sent with a body is the one of the row that body came from. A
+  // save can land between the conditional check above and this read; naming
+  // the older revision next to the newer copy would make the client's next
+  // save fail with 412 against the very copy it is editing.
+  c.header("etag", etagFor(row));
   c.header("cache-control", "private, no-store");
   c.header("x-txt-document-id", row.id);
   return c.json({

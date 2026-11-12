@@ -141,6 +141,13 @@ export class SyncEngine {
   private readonly drafts: DraftScheduler;
   private readonly revisions: RevisionGuard;
   private rollbackRefused = false;
+  /**
+   * Set while the base ETag is one taken over from a local draft: it names a
+   * copy this page never opened, so `baseRevision` (still the revision of the
+   * copy that was loaded) says nothing about it. Recognised by the pair, so
+   * it stops applying by itself as soon as any path adopts a real base.
+   */
+  private unopenedBase: { etag: string; revision: number } | null = null;
   private refusedGeneration = -1;
   private forceSave = false;
 
@@ -170,7 +177,7 @@ export class SyncEngine {
         else report(state, detail);
       },
     };
-    this.baseDocument = options.callbacks.getDocument();
+    this.baseDocument = snapshotOf(options.callbacks.getDocument());
     this.accountId = options.accountId;
     this.documentId = options.documentId;
     this.keyVersion = options.keyVersion;
@@ -304,6 +311,9 @@ export class SyncEngine {
   /* ---------------------------------------------------------------- */
 
   private scheduleSave(): void {
+    // Stopped (locked, or a rollback was refused): work that was in flight may
+    // still finish, but it starts nothing new.
+    if (this.stopped) return;
     if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
     this.debounceTimer = window.setTimeout(() => {
       void this.flush();
@@ -331,7 +341,7 @@ export class SyncEngine {
       // on an untouched sheet): there is nothing to send, and treating the
       // page as dirty would keep a newer remote version from being applied.
       this.dirty = false;
-      void this.drafts.clear();
+      this.discardDraft();
       this.callbacks.onState("idle");
       return;
     }
@@ -365,7 +375,9 @@ export class SyncEngine {
         ? this.inFlight
         : null;
     const mutationId = resend?.mutationId ?? crypto.randomUUID();
-    const document = resend?.document ?? this.callbacks.getDocument();
+    // What is sealed, and what becomes the base if the save is stored, is the
+    // document as it is now — not whatever the shared object holds later.
+    const document = resend?.document ?? snapshotOf(this.callbacks.getDocument());
     let payload: SavePayload;
     try {
       payload = resend?.payload ?? (await this.buildPayload({ document, mutationId, encryptedRevision }));
@@ -375,6 +387,8 @@ export class SyncEngine {
       await this.handleSaveError(error as Error, generation);
       return;
     }
+    // Stopped while the payload was being built: nothing more is sent.
+    if (this.stopped) return;
     if (this.baseRevision + 1 !== encryptedRevision || !this.dirty) {
       // A read moved the base while the payload was being encrypted. What was
       // built is sealed for a revision that is no longer next: start over
@@ -402,6 +416,18 @@ export class SyncEngine {
         },
         sentAgainst,
       );
+      if (this.stopped) {
+        // The page stopped while this save was in flight — a read refused a
+        // rollback, or the vault was locked. This answer must not report
+        // "saved", move the base, touch the draft or judge anything: what is
+        // on screen is no longer this session's document (§10.4). After a
+        // lock, an acknowledged save still counts as a copy this device has
+        // sealed.
+        if (!this.rollbackRefused && (knownWhenSent === null || encryptedRevision > knownWhenSent)) {
+          this.revisions.record(encryptedRevision);
+        }
+        return;
+      }
       if (knownWhenSent !== null && encryptedRevision <= knownWhenSent) {
         // The server accepted a revision this device had already seen
         // surpassed (another tab opened a newer copy). An honest server
@@ -438,7 +464,7 @@ export class SyncEngine {
         this.dirty = false;
         // The server now holds this content: the local draft is no longer a
         // recovery source and must not trigger a confirmation on next load.
-        void this.drafts.clear();
+        this.discardDraft();
         // Tell other tabs in this browser to fetch now instead of waiting for
         // their next poll (spec §10.5).
         this.announceChange();
@@ -448,6 +474,7 @@ export class SyncEngine {
         }, 2000);
       }
     } catch (error) {
+      if (this.stopped) return;
       if (this.baseEtag !== sentAgainst || !this.dirty) {
         // While this save was in flight a read moved the base (and perhaps
         // found the server already holding what is on screen). Whatever the
@@ -500,6 +527,20 @@ export class SyncEngine {
       documentJson: json,
       media: options.document.media,
     };
+  }
+
+  /**
+   * The server holds what is on screen, or the user chose to give the local
+   * copy up: the draft is no longer a recovery source. Never once the page
+   * has stopped, whatever a request that was still in flight reports later:
+   * after a refused rollback the draft may be the only copy of the newer
+   * text, and after a lock the next session may already be writing its own
+   * draft under the same key. (A draft left behind that equals the server
+   * copy is dropped without a question when the sheet is next opened.)
+   */
+  private discardDraft(): void {
+    if (this.stopped) return;
+    void this.drafts.clear();
   }
 
   /** Every outstanding save is accounted for (confirmed, or left behind by a newer base). */
@@ -575,7 +616,7 @@ export class SyncEngine {
   }
 
   private scheduleRetry(): void {
-    if (this.retryTimer !== null) return;
+    if (this.stopped || this.retryTimer !== null) return;
     const jitter = Math.random() * 0.3 + 0.85;
     const delay = Math.min(this.backoffMs * jitter, MAX_BACKOFF_MS);
     this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
@@ -597,6 +638,9 @@ export class SyncEngine {
       this.scheduleRetry();
       return;
     }
+    // Stopped while the read was in flight (a refused rollback, a lock):
+    // nothing further.
+    if (this.stopped) return;
     if (remote.notModified || !remote.data) {
       // An unconditional read always carries the copy; without one there is
       // nothing to compare with, so nothing is adopted as a base unseen.
@@ -619,6 +663,7 @@ export class SyncEngine {
       this.callbacks.onState("decrypt-failed", t("内容を開けません。データは変更していません。"));
       return;
     }
+    if (this.stopped) return;
     const freshness = this.judgeRevision(remote.data.encryptedRevision, knownWhenSent);
     if (freshness === "rollback") {
       this.refuseRollback();
@@ -652,10 +697,10 @@ export class SyncEngine {
     if (normalizedEqual(local, remoteDocument)) {
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.encryptedRevision;
-      this.baseDocument = remoteDocument;
+      this.baseDocument = snapshotOf(remoteDocument);
       this.dirty = false;
       this.forceSave = false;
-      void this.drafts.clear();
+      this.discardDraft();
       this.callbacks.onState("saved");
       return;
     }
@@ -665,7 +710,7 @@ export class SyncEngine {
       // there is no other writer to ask the user about.
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.encryptedRevision;
-      this.baseDocument = remoteDocument;
+      this.baseDocument = snapshotOf(remoteDocument);
       this.scheduleSave();
       return;
     }
@@ -677,7 +722,7 @@ export class SyncEngine {
       // back to the base may be the user undoing that save: ask instead.)
       this.dirty = false;
       this.forceSave = false;
-      void this.drafts.clear();
+      this.discardDraft();
       this.callbacks.onState("idle");
       void this.refreshRemote();
       return;
@@ -685,21 +730,45 @@ export class SyncEngine {
 
     this.callbacks.onState("conflict", t("競合があります。"));
     const decision = await this.callbacks.onConflict({ local, remote: remoteDocument });
+    // The page stopped while the question was open — it was locked, or a read
+    // refused a rollback. It no longer syncs: no answer replaces the screen
+    // or gives the draft up.
+    if (this.stopped) return;
     if (this.baseEtag !== refusedAgainst || !this.dirty) {
       // The question can stay open for a long time, and reads go on behind
-      // it. One of them has moved the base (for instance by finding the
-      // server and the screen equal): the copy the question was about is no
-      // longer the one to act on. Applying it now would put an outdated
+      // it. One of them has moved the base (by finding the server and the
+      // screen equal): the conflict the question was about is gone, and the
+      // copy it showed is outdated. Applying that copy now would put an old
       // version on screen and move the base backwards.
-      if (decision === "use-remote") {
-        // The user wants the server's copy: take the current one, the usual way.
+      if (decision === "use-remote" && this.dirty && this.callbacks.isSafePoint()) {
+        // Something changed locally after that read — an upload that was
+        // still running inserted its block behind the question. The user
+        // chose the server's copy over the local one, so the copy at the
+        // current base goes on screen. Clearing `dirty` alone would leave
+        // content that is neither saved nor known to be unsaved.
         this.dirty = false;
         this.forceSave = false;
-        void this.drafts.clear();
+        // Cleared before the apply, which may itself start a (repair) save.
+        this.discardDraft();
+        // The app takes the object it is given as its own state: it gets the
+        // copy the base was, and the engine keeps a fresh one.
+        const serverCopy = this.baseDocument;
+        this.baseDocument = snapshotOf(serverCopy);
+        this.callbacks.applyRemote(serverCopy);
+      }
+      if (this.dirty) {
+        // Kept on purpose — or a composition is under way, and the editor
+        // must not be replaced now. Either way what is on screen continues
+        // from the current base, so it is saved from there; with the base up
+        // to date there is no conflict left to ask about.
+        this.scheduleSave();
+        return;
+      }
+      if (decision === "use-remote") {
+        // The screen holds the copy at the base; take anything newer the
+        // usual way.
         this.callbacks.onState("idle");
         void this.refreshRemote();
-      } else if (this.dirty) {
-        this.scheduleSave();
       }
       return;
     }
@@ -709,12 +778,12 @@ export class SyncEngine {
       const documentBeforeAnswer = this.baseDocument;
       this.baseEtag = remote.etag ?? null;
       this.baseRevision = remote.data.encryptedRevision;
-      this.baseDocument = remoteDocument;
+      this.baseDocument = snapshotOf(remoteDocument);
       this.dirty = false;
       this.forceSave = false;
       // The local copy was discarded on purpose: it must not be offered back.
       // Cleared before the apply, which may itself start a new (repair) save.
-      void this.drafts.clear();
+      this.discardDraft();
       if (!this.callbacks.isSafePoint()) {
         // A composition is under way: the editor must not be touched now, so
         // the choice cannot be carried out. The base goes back to where it
@@ -735,7 +804,7 @@ export class SyncEngine {
       // Keep editing; the next save uses the refreshed base ETag.
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.encryptedRevision;
-      this.baseDocument = remoteDocument;
+      this.baseDocument = snapshotOf(remoteDocument);
       this.inFlight = null;
       this.scheduleSave();
     }
@@ -800,9 +869,33 @@ export class SyncEngine {
     }
     const knownWhenSent = this.revisions.current();
     const baseWhenSent = this.baseEtag;
+    // An ETag taken over from a draft names a copy this page has not opened.
+    // "Anything newer than that?" could be answered "no" for ever while the
+    // screen shows an older copy, so the read is unconditional until a real
+    // base has been adopted.
+    const unopened = this.baseEtagIsUnopened();
     try {
-      const result = await api.document(baseWhenSent ?? undefined);
-      if (this.stopped || result.notModified || !result.data) return;
+      const result = await api.document(unopened ? undefined : baseWhenSent ?? undefined);
+      if (this.stopped) return;
+      if (result.notModified) {
+        // 304 says "the copy at the base you sent is still the current one".
+        // If this device had already opened a newer copy when the request
+        // went out (another tab did), an honest server holds at least that
+        // copy and would have sent it: this one went back to the base (§10.4).
+        // The numbers compared are both authenticated — the mark, and the
+        // revision of the base this page decrypted or sealed itself. That is
+        // only true while the ETag and the revision describe the same copy,
+        // which is why a base taken over from a draft is never read
+        // conditionally (above) and is excluded here as well.
+        if (
+          baseWhenSent !== null && this.baseEtag === baseWhenSent && !unopened &&
+          knownWhenSent !== null && this.baseRevision < knownWhenSent
+        ) {
+          this.refuseRollback();
+        }
+        return;
+      }
+      if (!result.data) return;
       const remoteDocument = await this.bridge.decryptDocument({
         mutationId: result.data.mutationId,
         encryptedRevision: result.data.encryptedRevision,
@@ -811,6 +904,9 @@ export class SyncEngine {
         nonce: result.data.nonce,
         ciphertext: result.data.ciphertext,
       });
+      // Stopped while the copy was being opened (locked, or another read
+      // refused a rollback): it is not judged and not applied.
+      if (this.stopped) return;
       const freshness = this.judgeRevision(result.data.encryptedRevision, knownWhenSent);
       if (freshness === "rollback") {
         this.refuseRollback();
@@ -834,7 +930,7 @@ export class SyncEngine {
         // back to the old base IS a change (see `unconfirmed`).
         this.dirty = false;
         this.forceSave = false;
-        void this.drafts.clear();
+        this.discardDraft();
         this.callbacks.onState("idle");
       }
       if (this.dirty) {
@@ -843,13 +939,13 @@ export class SyncEngine {
           // The content already converged: adopt the newer base and stop.
           this.baseEtag = result.etag ?? this.baseEtag;
           this.baseRevision = result.data.encryptedRevision;
-          this.baseDocument = remoteDocument;
+          this.baseDocument = snapshotOf(remoteDocument);
           this.dirty = false;
           this.forceSave = false;
           // Every save still unaccounted for was sent against a base the
           // server has left; none can be underneath the copy just adopted.
           this.forgetUnconfirmed();
-          void this.drafts.clear();
+          this.discardDraft();
           this.callbacks.onState("saved");
           return;
         }
@@ -867,7 +963,7 @@ export class SyncEngine {
       if (!this.callbacks.isSafePoint()) return;
       this.baseEtag = result.etag ?? this.baseEtag;
       this.baseRevision = result.data.encryptedRevision;
-      this.baseDocument = remoteDocument;
+      this.baseDocument = snapshotOf(remoteDocument);
       this.forgetUnconfirmed();
       this.callbacks.applyRemote(remoteDocument);
     } catch (error) {
@@ -903,11 +999,16 @@ export class SyncEngine {
    * every later keystroke keeps being stored.
    */
   private refuseRollback(): void {
+    // A page that had already stopped has nothing of its own on screen any
+    // more (the editor is emptied at a lock), and what it stored then stands.
+    const firstStop = !this.stopped;
     this.rollbackRefused = true;
     this.stopped = true;
     this.clearTimers();
-    this.drafts.noteChange();
-    void this.drafts.flush();
+    if (firstStop) {
+      this.drafts.noteChange();
+      void this.drafts.flush();
+    }
     this.callbacks.onState("decrypt-failed", ROLLBACK_NOTICE());
   }
 
@@ -918,7 +1019,22 @@ export class SyncEngine {
    * silently overwriting newer remote content.
    */
   setBaseFromDraft(baseEtag: string | null): void {
-    if (baseEtag) this.baseEtag = baseEtag;
+    // A draft written by an earlier build may hold the weak form the edge
+    // sent (`W/"…"`). It names the same copy as the strong form this page
+    // holds, and must not be taken for another one.
+    const etag = baseEtag?.replace(/^W\//, "") ?? null;
+    if (!etag || etag === this.baseEtag) return;
+    this.baseEtag = etag;
+    this.unopenedBase = { etag, revision: this.baseRevision };
+  }
+
+  /** True while the base ETag is one taken over from a draft (see `unopenedBase`). */
+  private baseEtagIsUnopened(): boolean {
+    return (
+      this.unopenedBase !== null &&
+      this.unopenedBase.etag === this.baseEtag &&
+      this.unopenedBase.revision === this.baseRevision
+    );
   }
 
   /* ---------------------------------------------------------------- */
@@ -954,6 +1070,19 @@ interface SavePayload {
   referencedMediaIds: string[];
   documentJson: string;
   media: Record<string, MediaInfo>;
+}
+
+/**
+ * A copy the engine owns. The app goes on changing the object it shares with
+ * the engine — it registers an upload in the media map before the block is
+ * inserted — and the base must not change with it.
+ */
+function snapshotOf(document: DocumentModel): DocumentModel {
+  return {
+    ...document,
+    blocks: document.blocks.map((block) => ({ ...block })),
+    media: { ...document.media },
+  };
 }
 
 function sortedMediaIds(document: DocumentModel): string[] {

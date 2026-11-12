@@ -28,6 +28,7 @@ import type { MediaRejectedError } from "./media.ts";
 import { cancelExit, playExit, replayEnter } from "./motion.ts";
 import { runIntro } from "./onboarding.ts";
 import { shareApp } from "./share.ts";
+import { SerialQueue } from "./serial-queue.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
 import { RevisionGuard, RollbackError } from "./revision-guard.ts";
 import { ServiceWorkerBridge } from "./service-worker-bridge.ts";
@@ -263,13 +264,71 @@ interface DialogAction extends ButtonTone {
  */
 let dialogToken = 0;
 
-function showDialog(options: {
+interface DialogOptions {
   title: string;
   body: HTMLElement | string;
   actions: DialogAction[];
   /** `menu`: a list of rows with a close button (「その他」, §4.6). */
   variant?: "menu";
-}): Promise<string> {
+  /**
+   * Still shown if the session is locked while the request is waiting for an
+   * earlier dialog. Only for what cannot be asked again: a recovery key that
+   * has already replaced the old one on the server.
+   */
+  survivesLock?: boolean;
+}
+
+/** Dialog requests, in the order they were made. */
+const dialogQueue = new SerialQueue();
+
+/** Detaches the open dialog's handlers, and with them what they hold. */
+let releaseOpenDialog: (() => void) | null = null;
+
+/**
+ * A dialog that opens in the moment after another one was answered takes no
+ * input for this long. Requests are answered one after another, so a waiting
+ * question appears exactly when the user clicks; the second click of a double
+ * click, or a key still held down, belongs to the dialog that was just
+ * answered — not to a question nobody has read yet (the conflict question's
+ * buttons each give one copy up).
+ */
+const DIALOG_INPUT_GUARD_MS = 400;
+
+/** When a dialog was last answered or dismissed (`performance.now()`). */
+let lastDialogAnswerAt = Number.NEGATIVE_INFINITY;
+
+/**
+ * Asks one question in the app's dialog and resolves with the answer.
+ *
+ * There is a single dialog element, and requests come from flows that know
+ * nothing of each other: the sync engine asks about a conflict whenever a save
+ * is refused, while the user may be halfway into a screen that opens its
+ * dialog after an await (the passkey list, a rotated recovery key). A later
+ * request therefore waits for the answer to the one that is open. Taking the
+ * element over would leave the earlier question without buttons, never to be
+ * answered — and a conflict that is never answered stops saving for good.
+ */
+function showDialog(options: DialogOptions): Promise<string> {
+  return dialogQueue.run(() => openDialog(options), { keepOnReset: options.survivesLock === true });
+}
+
+/**
+ * Releases the dialog when the session ends: what is open is closed without
+ * an answer, what was waiting never opens (unless it `survivesLock`), and
+ * nothing shown while unlocked stays in the DOM or in a handler. The dialogs
+ * of the gate start from a clean slate.
+ */
+function abandonDialogs(): void {
+  dialogToken += 1;
+  releaseOpenDialog?.();
+  releaseOpenDialog = null;
+  if (elements.dialog.open) elements.dialog.close();
+  clearDialogContent();
+  // Last: a request that survives the lock opens as soon as the queue is free.
+  dialogQueue.reset();
+}
+
+function openDialog(options: DialogOptions): Promise<string> {
   return new Promise((resolve) => {
     let settled = false;
     /**
@@ -281,15 +340,27 @@ function showDialog(options: {
      */
     const dialog = elements.dialog;
     const openToken = ++dialogToken;
+    /** Until when this dialog takes no input (`performance.now()`); set below. */
+    let guardUntil = Number.NEGATIVE_INFINITY;
     const settle = (value: string): void => {
       if (settled) return;
       settled = true;
-      dialog.removeEventListener("close", onClose);
+      lastDialogAnswerAt = performance.now();
       // A dialog can show a recovery key or document text.
       // Callers keep their own references to the nodes they still need; the
       // page itself must not go on holding the content once it is answered.
-      if (openToken === dialogToken) clearDialogContent();
+      if (openToken === dialogToken) {
+        release();
+        releaseOpenDialog = null;
+        clearDialogContent();
+      } else {
+        dialog.removeEventListener("close", onClose);
+      }
       resolve(value);
+    };
+    const release = (): void => {
+      dialog.removeEventListener("close", onClose);
+      elements.dialogClose.onclick = null;
     };
     const onClose = (): void => {
       // A `close` event fires asynchronously. When the next dialog has already
@@ -297,6 +368,13 @@ function showDialog(options: {
       // and must be ignored — `dialog.open` is the reliable discriminator,
       // because a genuine user dismissal leaves it closed.
       if (openToken !== dialogToken || settled || dialog.open) return;
+      if (performance.now() < guardUntil) {
+        // Closed (Escape, the Back gesture) before it could have been read:
+        // that is no answer. The content and handlers are still in place.
+        dialog.returnValue = "";
+        dialog.showModal();
+        return;
+      }
       const value = dialog.returnValue || "dismissed";
       dialog.returnValue = "";
       settle(value);
@@ -317,9 +395,11 @@ function showDialog(options: {
     };
     // Rebuilding the buttons each time prevents stale listeners from resolving
     // a later dialog with an earlier answer.
+    const buttons: HTMLButtonElement[] = [];
     elements.dialogActions.replaceChildren(
       ...options.actions.flatMap((action) => {
         const button = isMenu ? menuItem(action) : document.createElement("button");
+        buttons.push(button);
         button.type = "button";
         if (!isMenu) {
           button.className = buttonClass(action);
@@ -339,13 +419,57 @@ function showDialog(options: {
         return [separator, button];
       }),
     );
+    // Opened in the wake of another answer: no input yet (see the constant).
+    guardUntil = lastDialogAnswerAt + DIALOG_INPUT_GUARD_MS;
+    const guardLeft = guardUntil - performance.now();
+    elements.dialogClose.disabled = guardLeft > 0;
+    if (guardLeft > 0) {
+      for (const button of buttons) button.disabled = true;
+      window.setTimeout(() => {
+        // The focus is deliberately not moved to a button: a key that is
+        // still held down would press it. Tab reaches the first one.
+        for (const button of buttons) button.disabled = false;
+        if (openToken === dialogToken && !settled) elements.dialogClose.disabled = false;
+      }, guardLeft);
+    }
     dialog.addEventListener("close", onClose);
+    releaseOpenDialog = release;
     // Clear any leftover value *before* opening: a `close` event from the
     // previous dialog can arrive after this one is shown, and reading a stale
     // `returnValue` would answer the new dialog with the old answer.
     dialog.returnValue = "";
     if (!dialog.open) dialog.showModal();
   });
+}
+
+/**
+ * The conflict question (spec §10.4): both copies are shown and the user
+ * chooses. Closing the dialog any other way (Escape, the Back gesture) is not
+ * a choice — least of all "save mine over the other device's copy" — so the
+ * question is asked again until one of the two is picked.
+ */
+async function askConflict(details: { local: DocumentModel; remote: DocumentModel }): Promise<"keep-local" | "use-remote"> {
+  const localPreview = window.document.createElement("pre");
+  localPreview.textContent = serializeDocument(details.local);
+  const remotePreview = window.document.createElement("pre");
+  remotePreview.textContent = serializeDocument(details.remote);
+  const body = window.document.createElement("div");
+  const localLabel = window.document.createElement("p");
+  localLabel.textContent = t("この端末の内容");
+  const remoteLabel = window.document.createElement("p");
+  remoteLabel.textContent = t("サーバーの内容");
+  body.append(localLabel, localPreview, remoteLabel, remotePreview);
+  for (;;) {
+    const decision = await showDialog({
+      title: t("競合しています"),
+      body,
+      actions: [
+        { label: t("編集して保存"), value: "keep-local", primary: true },
+        { label: t("サーバーの内容を使う"), value: "use-remote", primary: false },
+      ],
+    });
+    if (decision === "keep-local" || decision === "use-remote") return decision;
+  }
 }
 
 /** Empties the shared dialog so nothing shown in it outlives its answer. */
@@ -927,27 +1051,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
           }
         }
       },
-      onConflict: async ({ local, remote }) => {
-        const localPreview = window.document.createElement("pre");
-        localPreview.textContent = serializeDocument(local);
-        const remotePreview = window.document.createElement("pre");
-        remotePreview.textContent = serializeDocument(remote);
-        const body = window.document.createElement("div");
-        const localLabel = window.document.createElement("p");
-        localLabel.textContent = t("この端末の内容");
-        const remoteLabel = window.document.createElement("p");
-        remoteLabel.textContent = t("サーバーの内容");
-        body.append(localLabel, localPreview, remoteLabel, remotePreview);
-        const decision = await showDialog({
-          title: t("競合しています"),
-          body,
-          actions: [
-            { label: t("編集して保存"), value: "keep-local", primary: true },
-            { label: t("サーバーの内容を使う"), value: "use-remote", primary: false },
-          ],
-        });
-        return decision === "use-remote" ? "use-remote" : "keep-local";
-      },
+      onConflict: askConflict,
       isSafePoint: () => state.editor?.isSafePoint() ?? true,
     },
     accountId: vault.accountId,
@@ -1181,9 +1285,7 @@ function releaseSession(): void {
   state.bridge = null;
   state.unlocked = null;
   // Nothing typed or shown while unlocked stays in the DOM behind the gate.
-  dialogToken += 1;
-  if (elements.dialog.open) elements.dialog.close();
-  clearDialogContent();
+  abandonDialogs();
   elements.recoveryInput.value = "";
   for (const url of state.objectUrls.values()) URL.revokeObjectURL(url);
   state.objectUrls.clear();
@@ -1342,7 +1444,10 @@ function reportAuthError(error: unknown): void {
  * Copying and saving to a file are explicit actions; 「保存しました」 only
  * confirms and has no clipboard side effect.
  */
-async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
+async function confirmRecoveryKey(
+  recoveryKeyText: string,
+  options: { survivesLock?: boolean } = {},
+): Promise<boolean> {
   const body = document.createElement("div");
   const key = document.createElement("pre");
   key.className = "recovery-key";
@@ -1386,6 +1491,7 @@ async function confirmRecoveryKey(recoveryKeyText: string): Promise<boolean> {
   const decision = await showDialog({
     title: t("復旧キーを保存してください"),
     body,
+    survivesLock: options.survivesLock,
     actions: [
       { label: t("保存しました"), value: "confirm", primary: true },
       { label: t("あとで"), value: "later", tone: "ghost" },
@@ -1404,7 +1510,7 @@ async function recoveryFlow(): Promise<void> {
   elements.gateFootnote.textContent = t("復旧しています……");
   elements.gateFootnote.dataset.state = "idle";
   try {
-    const outcome = await recoverWithKey(value, confirmRecoveryKey);
+    const outcome = await recoverWithKey(value, (text) => confirmRecoveryKey(text));
     // The typed recovery key has been spent (it is rotated on completion).
     elements.recoveryInput.value = "";
     await startSession({
@@ -1441,10 +1547,16 @@ async function performStepUp(): Promise<void> {
  * passkey cannot be revoked; the server enforces that too.
  */
 async function manageSecurity(): Promise<void> {
+  const generation = state.sessionGeneration;
   let credentials: CredentialSummary[];
   let sessions: SessionSummary[];
   try {
-    const [credentialList, sessionList] = await Promise.all([api.credentials(), api.sessions()]);
+    const lists = await prepareOnce("security", () => Promise.all([api.credentials(), api.sessions()]));
+    if (!lists) return;
+    // Locked while the lists were loading: the screen belonged to that
+    // session and does not open over the gate, or in the next session.
+    if (generation !== state.sessionGeneration || !state.unlocked) return;
+    const [credentialList, sessionList] = lists.value;
     credentials = credentialList.credentials.filter((entry) => entry.status === "active");
     sessions = sessionList.sessions;
   } catch (error) {
@@ -1527,9 +1639,46 @@ async function manageSecurity(): Promise<void> {
 /* "その他" menu (spec §4.6)                                           */
 /* ------------------------------------------------------------------ */
 
+/** Actions that are still preparing the dialog they will show. */
+const preparing = new Set<string>();
+
+/**
+ * Resolves once no recovery-key rotation is still on its way to the dialog
+ * queue: every rotation that was started has either failed or has asked for
+ * the dialog that shows its new key. (Whether that dialog has been answered
+ * is `dialogQueue.whenIdle()`'s business.)
+ */
+let rotationsAnnounced: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs what an action does before it shows its dialog — reading a list,
+ * rotating a key — unless the same action is already doing so; returns null
+ * in that case. While that work runs nothing is on screen, so the user can
+ * ask for the action again; since dialog requests are answered one after
+ * another, the second would show the same dialog again right after the first
+ * was closed. The claim ends with the work, not with the dialog: an open
+ * dialog is modal (the action cannot be reached), and one abandoned by a
+ * lock never returns.
+ */
+async function prepareOnce<T>(action: string, work: () => Promise<T>): Promise<{ value: T } | null> {
+  if (preparing.has(action)) return null;
+  preparing.add(action);
+  try {
+    return { value: await work() };
+  } finally {
+    preparing.delete(action);
+  }
+}
+
 async function showMoreMenu(): Promise<void> {
+  const generation = state.sessionGeneration;
   const accountId = state.unlocked?.accountId;
-  const kept = accountId ? await loadKeptVaultKey(accountId).catch(() => null) : null;
+  const prepared = await prepareOnce("menu", async () =>
+    (accountId ? loadKeptVaultKey(accountId).catch(() => null) : null));
+  if (!prepared) return;
+  // Locked in the meantime: the menu belonged to that session.
+  if (generation !== state.sessionGeneration) return;
+  const kept = prepared.value;
   const keepLabel = kept ? t("この端末の保持を解除") : t("この端末に保持（30日）");
   const decision = await showDialog({
     title: t("その他"),
@@ -1621,14 +1770,26 @@ async function showMoreMenu(): Promise<void> {
       }
       break;
     case "rotate-recovery": {
+      let announce!: () => void;
+      const announced = new Promise<void>((resolve) => { announce = resolve; });
+      rotationsAnnounced = Promise.all([rotationsAnnounced, announced]);
       try {
-        const text = await rotateRecoveryKey({
-          vaultKey: state.unlocked.vaultKey,
-          accountId: state.unlocked.accountId,
-        });
-        await confirmRecoveryKey(text);
+        const unlocked = state.unlocked;
+        const rotated = await prepareOnce("rotate-recovery", () => rotateRecoveryKey({
+          vaultKey: unlocked.vaultKey,
+          accountId: unlocked.accountId,
+        }));
+        if (rotated) {
+          // The old key no longer works: this one must reach the user even
+          // if the page is locked while the dialog waits its turn.
+          const confirmed = confirmRecoveryKey(rotated.value, { survivesLock: true });
+          announce(); // its dialog is in the queue now
+          await confirmed;
+        }
       } catch (error) {
         toast((error as Error).message);
+      } finally {
+        announce();
       }
       break;
     }
@@ -1636,6 +1797,12 @@ async function showMoreMenu(): Promise<void> {
       await manageSecurity();
       break;
     case "end-session":
+      // Dialogs still due are shown and answered first — above all a recovery
+      // key that has already replaced the old one, or is about to (a rotation
+      // whose request is still on its way). The reload below would take it
+      // off the screen before anyone has seen it.
+      await rotationsAnnounced;
+      await dialogQueue.whenIdle();
       await api.endSession().catch(() => undefined);
       if (state.unlocked) {
         await clearAccountDrafts(state.unlocked.accountId);

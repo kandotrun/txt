@@ -813,3 +813,118 @@ test("spec: Service Worker再起動後の最初の操作が添付の追加でも
   });
   expect(loaded).toBe(true);
 });
+
+test("spec: 競合の問いは後から要求された別のダイアログに置き換えられず、答えたあと保存が続く", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("A1");
+  await waitForSync(page);
+
+  // This tab stops hearing about newer copies (its conditional reads fail on
+  // the network), so its next save meets the other tab's copy as a conflict.
+  await page.route("**/api/v1/document", (route) => {
+    const request = route.request();
+    if (request.method() === "GET" && request.headers()["if-none-match"]) return route.abort();
+    return route.continue();
+  });
+  const second = await page.context().newPage();
+  await second.goto(BASE);
+  await expect(second.locator("#app")).toBeVisible({ timeout: 30000 });
+  await second.locator("#editor-host .ProseMirror p").first().click();
+  await second.keyboard.press("Home");
+  await second.keyboard.type("B:");
+  await waitForSync(second);
+  await second.close();
+  await page.bringToFront();
+
+  // The passkeys-and-sessions screen is requested, but its lists are slow.
+  let releaseLists!: () => void;
+  const listsReleased = new Promise<void>((resolve) => { releaseLists = resolve; });
+  const holdList = async (route: import("@playwright/test").Route): Promise<void> => {
+    if (route.request().method() === "GET") await listsReleased;
+    await route.continue();
+  };
+  await page.route("**/api/v1/credentials", holdList);
+  await page.route("**/api/v1/sessions", holdList);
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーとセッション" }).click();
+
+  // Meanwhile the user types; the save is refused and the conflict is asked.
+  await editor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type("X");
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("競合しています", { timeout: 30000 });
+
+  // The lists arrive. The question stays where it is, with its buttons.
+  const listsArrived = Promise.all(["credentials", "sessions"].map((name) =>
+    page.waitForResponse((response) => response.url().endsWith(`/api/v1/${name}`) && response.request().method() === "GET")));
+  releaseLists();
+  await listsArrived;
+  await page.waitForTimeout(500);
+  await expect(dialog).toContainText("競合しています");
+  await expect(dialog).not.toContainText("パスキー1");
+  await dialog.getByRole("button", { name: "編集して保存" }).click();
+
+  // Only then does the other screen open; closing it leaves saving intact.
+  await expect(dialog).toContainText("パスキー1", { timeout: 15000 });
+  await dialog.getByRole("button", { name: "閉じる" }).click();
+  await page.unroute("**/api/v1/document");
+  await waitForSync(page);
+  await page.reload();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("A1X", { timeout: 30000 });
+});
+
+test("spec: 「その他」を素早く2回押しても、メニューは1度だけ開く", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  // Two activations before the menu has had time to open (it first reads the
+  // device-keep state): the requests are answered one at a time, so a second
+  // one would bring the menu back after it was closed.
+  await page.locator("#more-button").evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("今すぐロック");
+  await page.locator("#dialog-close").click();
+  await page.waitForTimeout(800);
+  expect(await dialog.evaluate((node: HTMLDialogElement) => node.open)).toBe(false);
+});
+
+test("spec: 一覧の取得中に「パスキーとセッション」をもう一度選んでも、画面は1度だけ開く", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+
+  let releaseLists!: () => void;
+  const listsReleased = new Promise<void>((resolve) => { releaseLists = resolve; });
+  const holdList = async (route: import("@playwright/test").Route): Promise<void> => {
+    if (route.request().method() === "GET") await listsReleased;
+    await route.continue();
+  };
+  await page.route("**/api/v1/credentials", holdList);
+  await page.route("**/api/v1/sessions", holdList);
+
+  // Nothing is on screen while the lists load, so the action can be chosen
+  // again. Dialogs are shown one after another: a second request would bring
+  // the same screen back after it was closed.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await page.locator("#more-button").click();
+    await page.getByRole("button", { name: "パスキーとセッション" }).click();
+  }
+  const dialog = page.locator("dialog");
+  const listsArrived = Promise.all(["credentials", "sessions"].map((name) =>
+    page.waitForResponse((response) => response.url().endsWith(`/api/v1/${name}`) && response.request().method() === "GET")));
+  releaseLists();
+  await listsArrived;
+  await expect(dialog).toContainText("パスキー1", { timeout: 15000 });
+  await dialog.getByRole("button", { name: "閉じる" }).click();
+  await page.waitForTimeout(1000);
+  expect(await dialog.evaluate((node: HTMLDialogElement) => node.open)).toBe(false);
+});

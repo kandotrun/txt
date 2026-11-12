@@ -47,6 +47,10 @@ interface Harness {
   editor: { text: string; safe: boolean };
   type(text: string): void;
   listeners: Map<string, Array<() => void>>;
+  /** Fires the page's `focus` listeners: the engine reads the server now. */
+  focus(): void;
+  /** Where the device's rollback mark lives; shared by every tab of the browser. */
+  storage: ReturnType<typeof memoryStorage>;
 }
 
 function start(options: { revision: number; text: string }): Harness {
@@ -64,7 +68,8 @@ function start(options: { revision: number; text: string }): Harness {
   const editor = { text: options.text, safe: true };
   const states: string[] = [];
   const applied: string[] = [];
-  const revisions = new RevisionGuard(DOC_ID, memoryStorage());
+  const storage = memoryStorage();
+  const revisions = new RevisionGuard(DOC_ID, storage);
   revisions.record(options.revision);
   const engine = new SyncEngine({
     bridge: {
@@ -102,8 +107,9 @@ function start(options: { revision: number; text: string }): Harness {
   });
   engine.start();
   return {
-    engine, states, applied, editor, listeners,
+    engine, states, applied, editor, listeners, storage,
     type(text: string) { editor.text = text; engine.noteCommittedChange(); },
+    focus() { for (const handler of listeners.get("focus") ?? []) handler(); },
   };
 }
 
@@ -225,8 +231,8 @@ describe("SyncEngine", () => {
     });
     const h = start({ revision: 5, text: "v5" });
 
-    for (const handler of h.listeners.get("focus") ?? []) handler(); // read #1 (slow)
-    for (const handler of h.listeners.get("focus") ?? []) handler(); // read #2 (fast): r6 applied
+    h.focus(); // read #1 (slow)
+    h.focus(); // read #2 (fast): r6 applied
     await vi.advanceTimersByTimeAsync(10);
     expect(h.applied).toEqual(["r6"]);
 
@@ -319,7 +325,7 @@ describe("SyncEngine", () => {
     const h = start({ revision: 5, text: "v5" });
     h.type("hello");
     await vi.advanceTimersByTimeAsync(400); // the save is in flight
-    for (const handler of h.listeners.get("focus") ?? []) handler(); // the read is in flight
+    h.focus(); // the read is in flight
     await vi.advanceTimersByTimeAsync(10);
     releaseSave();
     await vi.advanceTimersByTimeAsync(10);
@@ -376,7 +382,7 @@ describe("SyncEngine", () => {
     h.type("v11");
     await vi.advanceTimersByTimeAsync(500); // saved; the "idle" timer is pending
     get.mockResolvedValue(serverCopy(12, "old", 3));
-    for (const handler of h.listeners.get("focus") ?? []) handler();
+    h.focus();
     await vi.advanceTimersByTimeAsync(10);
     expect(h.states.at(-1)).toContain("以前の版に戻されています");
     await vi.advanceTimersByTimeAsync(5000); // the pending "idle" timer fires
@@ -584,7 +590,7 @@ describe("SyncEngine", () => {
     h.type("first");
     await vi.advanceTimersByTimeAsync(400); // stored, answer lost
     await vi.advanceTimersByTimeAsync(2000); // retry in flight (will be 412)
-    for (const handler of h.listeners.get("focus") ?? []) handler(); // a read converges on "first"
+    h.focus(); // a read converges on "first"
     await vi.advanceTimersByTimeAsync(50);
     h.type("first, second");
     releaseRetry(); // the 412 about the old base arrives now
@@ -626,7 +632,7 @@ describe("SyncEngine", () => {
       conflicts.push("asked");
       return "keep-local";
     };
-    const focus = (): void => { for (const handler of h.listeners.get("focus") ?? []) handler(); };
+    const focus = (): void => { h.focus(); };
 
     h.type("A");
     await vi.advanceTimersByTimeAsync(400); // stored as r6; the answer is still on its way
@@ -684,13 +690,629 @@ describe("SyncEngine", () => {
     h.type("first");
     await vi.advanceTimersByTimeAsync(400); // stored, answer lost
     await vi.advanceTimersByTimeAsync(2000); // retry: 412, the slow read starts
-    for (const handler of h.listeners.get("focus") ?? []) handler(); // an ordinary read converges
+    h.focus(); // an ordinary read converges
     await vi.advanceTimersByTimeAsync(50);
     h.type("first, second"); // the user types on
     releaseSlowRead(); // the read made for the 412 returns only now
     await vi.advanceTimersByTimeAsync(30_000);
     expect(conflicts).toEqual([]);
     expect(server.text).toBe("first, second");
+    h.engine.stop();
+  });
+
+  /**
+   * The conflict question is open while reads go on behind it. Another device
+   * stores exactly what this page shows, a read notices (the base moves, and
+   * nothing is unsaved any more), and then something changes locally after
+   * all — an upload that was still running inserts its block.
+   */
+  function dissolvedConflict() {
+    const server = { revision: 6, text: "phone", mutationId: "foreign" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    let answer!: (decision: "keep-local" | "use-remote") => void;
+    const answered = new Promise<"keep-local" | "use-remote">((resolve) => { answer = resolve; });
+    const conflicts: Array<{ local: string; remote: string }> = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: (details: { local: DocumentModel; remote: DocumentModel }) => Promise<string> } })
+      .callbacks.onConflict = async ({ local, remote }) => {
+        conflicts.push({
+          local: (local.blocks[0] as { text: string }).text,
+          remote: (remote.blocks[0] as { text: string }).text,
+        });
+        return answered;
+      };
+    return {
+      h, server, conflicts, answer,
+      /** Runs up to the point where the question is open and the conflict has dissolved. */
+      async untilDissolved(): Promise<void> {
+        h.type("X");
+        await vi.advanceTimersByTimeAsync(400); // refused: r6 "phone" is in the way
+        expect(conflicts).toEqual([{ local: "X", remote: "phone" }]);
+        server.revision = 7; server.text = "X"; server.mutationId = "foreign-2"; // the same text, from the other device
+        h.focus(); // a read finds server and screen equal
+        await vi.advanceTimersByTimeAsync(50);
+        expect((h.engine as unknown as { dirty: boolean }).dirty).toBe(false);
+      },
+    };
+  }
+
+  it("spec: choosing the server copy after the conflict dissolved also replaces a change made behind the question", async () => {
+    const { h, server, answer, untilDissolved } = dissolvedConflict();
+    await untilDissolved();
+    h.type("X + photo"); // the upload finishes behind the question
+    await vi.advanceTimersByTimeAsync(250); // its draft is stored
+    const clearedBeforeAnswer = draftStore.cleared;
+    answer("use-remote");
+    await vi.advanceTimersByTimeAsync(30_000);
+    // The server's copy is on screen, and the discarded change was neither
+    // saved nor left on screen as content that nothing marks as unsaved. Its
+    // draft is gone too: it must not be offered back on the next load.
+    expect.soft(draftStore.cleared).toBeGreaterThan(clearedBeforeAnswer);
+    expect.soft(h.editor.text).toBe("X");
+    expect.soft(server.text).toBe("X");
+    expect.soft(h.applied).toEqual(["X"]);
+    expect.soft((h.engine as unknown as { dirty: boolean }).dirty).toBe(false);
+    expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
+    h.engine.stop();
+  });
+
+  it("spec: keeping the local copy after the conflict dissolved saves a change made behind the question", async () => {
+    const { h, server, answer, untilDissolved } = dissolvedConflict();
+    await untilDissolved();
+    h.type("X + photo");
+    // The change's own save timers fire while the question is still open and
+    // find the engine busy: after the answer nothing else would send it.
+    await vi.advanceTimersByTimeAsync(2500);
+    answer("keep-local");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect.soft(h.applied).toEqual([]);
+    expect.soft(h.editor.text).toBe("X + photo");
+    expect(server.text).toBe("X + photo");
+    h.engine.stop();
+  });
+
+  it("spec: choosing the server copy during a composition, after the conflict dissolved, replaces nothing and loses nothing", async () => {
+    const { h, server, answer, untilDissolved } = dissolvedConflict();
+    await untilDissolved();
+    h.type("X + photo");
+    await vi.advanceTimersByTimeAsync(250); // the draft of that change is stored
+    h.editor.safe = false; // a composition starts
+    const clearedBeforeAnswer = draftStore.cleared;
+    answer("use-remote");
+    await vi.advanceTimersByTimeAsync(1000);
+    // The editor is not touched under the composition, and the draft of the
+    // unsaved change is still there.
+    expect.soft(h.applied).toEqual([]);
+    expect.soft(h.editor.text).toBe("X + photo");
+    expect.soft(draftStore.cleared).toBe(clearedBeforeAnswer);
+    h.editor.safe = true;
+    h.type("X + photo + か"); // the composition is committed
+    await vi.advanceTimersByTimeAsync(30_000);
+    // The base is current, so there is no conflict left to ask about: what is
+    // on screen is saved.
+    expect.soft(h.applied).toEqual([]);
+    expect(server.text).toBe("X + photo + か");
+    h.engine.stop();
+  });
+
+  it("spec: a save answered after a rollback was refused does not delete the draft the refusal stored", async () => {
+    // The save of the last paragraph is on its way when a read is answered
+    // with an older, authentic copy: the page refuses it and stores the screen
+    // as a draft. The answer to the save arrives only afterwards.
+    let rolledBack = false;
+    vi.spyOn(api, "document").mockImplementation(async () => (rolledBack ? serverCopy(5, "v5") : notModified));
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload) => {
+      const body = payload as { mutationId: string; encryptedRevision: number };
+      await answerGate;
+      return { etag: etag(body.encryptedRevision), revision: body.encryptedRevision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const h = start({ revision: 10, text: "v10" });
+    h.type("v10 + the last paragraph");
+    await vi.advanceTimersByTimeAsync(400);
+    rolledBack = true;
+    h.focus();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    expect(draftStore.saved.at(-1)).toContain("the last paragraph");
+    const clearedAtRefusal = draftStore.cleared;
+    releaseAnswer();
+    await vi.advanceTimersByTimeAsync(30_000);
+    // The draft may be the only copy of that paragraph: it stays.
+    expect.soft(draftStore.cleared).toBe(clearedAtRefusal);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    h.engine.stop();
+  });
+
+  it("spec: a refused save still being looked into when a rollback is refused does not delete that draft", async () => {
+    // The save is refused (412) and the engine reads the server copy, slowly.
+    // Meanwhile a poll is answered with an older copy and the page refuses.
+    // The slow read then returns a copy equal to the screen.
+    let rolledBack = false;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === undefined) {
+        await readGate; // the read made for the 412
+        return serverCopy(11, "v10 + the last paragraph");
+      }
+      return rolledBack ? serverCopy(5, "v5") : notModified;
+    });
+    vi.spyOn(api, "putDocument").mockRejectedValue(new ApiRequestError(412, "PRECONDITION_FAILED", "stale"));
+    const h = start({ revision: 10, text: "v10" });
+    h.type("v10 + the last paragraph");
+    await vi.advanceTimersByTimeAsync(400);
+    rolledBack = true;
+    h.focus();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    const clearedAtRefusal = draftStore.cleared;
+    releaseRead();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(draftStore.cleared).toBe(clearedAtRefusal);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    h.engine.stop();
+  });
+
+  it("spec: an answer to the conflict question given after a rollback was refused changes nothing", async () => {
+    let rolledBack = false;
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === undefined) return serverCopy(11, "phone"); // the copy that blocks the save
+      return rolledBack ? serverCopy(5, "v5") : notModified;
+    });
+    vi.spyOn(api, "putDocument").mockRejectedValue(new ApiRequestError(412, "PRECONDITION_FAILED", "stale"));
+    let answer!: (decision: "keep-local" | "use-remote") => void;
+    const answered = new Promise<"keep-local" | "use-remote">((resolve) => { answer = resolve; });
+    const h = start({ revision: 10, text: "v10" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = () => answered;
+    h.type("v10 + the last paragraph");
+    await vi.advanceTimersByTimeAsync(400); // the question is open
+    expect(h.states.at(-1)).toMatch(/^conflict/);
+    rolledBack = true;
+    h.focus();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    const clearedAtRefusal = draftStore.cleared;
+    answer("use-remote");
+    await vi.advanceTimersByTimeAsync(30_000);
+    // Syncing has stopped on this page: the copy the question showed is not
+    // put on screen, and the draft is not dropped.
+    expect.soft(h.applied).toEqual([]);
+    expect.soft(h.editor.text).toBe("v10 + the last paragraph");
+    expect(draftStore.cleared).toBe(clearedAtRefusal);
+    h.engine.stop();
+  });
+
+  it("spec: a 304 for a base this device has already seen surpassed is refused as a rollback", async () => {
+    // Another tab of this browser has opened r10. This page still holds r5 and
+    // asks whether anything changed; "no" can only come from a server that
+    // went back to r5.
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    const put = vi.spyOn(api, "putDocument").mockRejectedValue(new Error("must not be called"));
+    const h = start({ revision: 5, text: "v5" });
+    new RevisionGuard(DOC_ID, h.storage).record(10);
+    await vi.advanceTimersByTimeAsync(3000); // the first poll
+    expect.soft(h.states.at(-1) ?? "").toContain("以前の版に戻されています");
+    expect.soft(h.applied).toEqual([]);
+    expect(put).not.toHaveBeenCalled();
+    h.engine.stop();
+  });
+
+  it("spec: a 304 for the newest copy this device knows is not a rollback", async () => {
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    const h = start({ revision: 5, text: "v5" });
+    new RevisionGuard(DOC_ID, h.storage).record(5); // another tab holds the same copy
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.states.join("|")).not.toContain("以前の版に戻されています");
+    expect((h.engine as unknown as { rollbackRefused: boolean }).rollbackRefused).toBe(false);
+    h.engine.stop();
+  });
+
+  it("spec: a save the server accepts for a revision another tab already surpassed is refused as a rollback", async () => {
+    // No read has run yet (the first poll is seconds away), so the save is
+    // what meets the rolled-back server first.
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload) => {
+      const body = payload as { mutationId: string; encryptedRevision: number };
+      return { etag: etag(body.encryptedRevision), revision: body.encryptedRevision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const h = start({ revision: 5, text: "v5" });
+    new RevisionGuard(DOC_ID, h.storage).record(6); // another tab opened r6
+    h.type("v5 + typed here");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect.soft((h.engine as unknown as { rollbackRefused: boolean }).rollbackRefused).toBe(true);
+    expect.soft(h.states.at(-1)).toContain("以前の版に戻されています");
+    expect(draftStore.saved.at(-1)).toContain("typed here");
+    h.engine.stop();
+  });
+
+  it("spec: a payload sealed for a revision that is no longer next is not sent", async () => {
+    // One device. The save of "X" is stored and its answer lost. A change that
+    // changes nothing starts another save, whose encryption is slow; meanwhile
+    // a read finds everything saved (base r6) and the user types on.
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    const puts: string[] = [];
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts.push(`${body.encryptedRevision}@${ifMatch.slice(-3, -1)}`);
+      // The Worker's CAS: the ETag first, then the revision the copy is sealed for.
+      if (ifMatch !== etag(server.revision) || body.encryptedRevision !== server.revision + 1) {
+        throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      }
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      if (puts.length === 1) throw new TypeError("Failed to fetch"); // stored, answer lost
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: (details: { local: DocumentModel; remote: DocumentModel }) => Promise<string> } })
+      .callbacks.onConflict = async ({ local, remote }) => {
+        conflicts.push(`${(local.blocks[0] as { text: string }).text} vs ${(remote.blocks[0] as { text: string }).text}`);
+        return "keep-local";
+      };
+    const bridge = (h.engine as unknown as { bridge: { encryptDocument: (input: unknown) => Promise<unknown> } }).bridge;
+    const encrypt = bridge.encryptDocument;
+    let releaseEncryption!: () => void;
+    const encryptionGate = new Promise<void>((resolve) => { releaseEncryption = resolve; });
+    let encryptions = 0;
+    bridge.encryptDocument = async (input) => {
+      encryptions += 1;
+      if (encryptions === 2) await encryptionGate;
+      return encrypt(input);
+    };
+
+    h.type("X");
+    await vi.advanceTimersByTimeAsync(400); // stored as r6, answer lost
+    h.engine.noteCommittedChange(); // a change that changes nothing
+    await vi.advanceTimersByTimeAsync(350); // the next save is being encrypted
+    h.focus(); // a read finds the server holding "X": base r6
+    await vi.advanceTimersByTimeAsync(20);
+    h.type("X+");
+    releaseEncryption();
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect.soft(conflicts).toEqual([]);
+    expect.soft(puts).toEqual(["6@r5", "7@r6"]);
+    expect(server.text).toBe("X+");
+    h.engine.stop();
+  });
+
+  it("spec: a 304 for a base ETag taken over from a draft is not judged as a rollback", async () => {
+    // A duplicated tab. This page read r5; the other page then saved r6 and
+    // left a draft written against r6, which this page adopts. Its ETag now
+    // names r6 — a copy this page never opened — while the revision it knows
+    // is still 5. The server is honest throughout.
+    const server = { revision: 6, text: "v5 a", mutationId: "other" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      if (ifMatch !== etag(server.revision) || body.encryptedRevision !== server.revision + 1) {
+        throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      }
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    let answer!: (decision: "keep-local" | "use-remote") => void;
+    const answered = new Promise<"keep-local" | "use-remote">((resolve) => { answer = resolve; });
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = () => answered;
+    new RevisionGuard(DOC_ID, h.storage).record(6); // the other page's save
+    h.editor.text = "v5 a b"; // the adopted draft
+    h.engine.setBaseFromDraft(etag(6));
+    h.engine.noteCommittedChange();
+    h.focus(); // a read before the save has even gone out: 304 for r6
+    await vi.advanceTimersByTimeAsync(400); // the save is refused (sealed for r6, not r7); the question opens
+    await vi.advanceTimersByTimeAsync(6000); // polls behind the question: 304 for r6
+    expect.soft((h.engine as unknown as { rollbackRefused: boolean }).rollbackRefused).toBe(false);
+    expect.soft(h.states.join("|")).not.toContain("以前の版に戻されています");
+    answer("keep-local");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(server.text).toBe("v5 a b");
+    h.engine.stop();
+  });
+
+  it("spec: after a refused rollback, a save that was still being encrypted is not sent", async () => {
+    let rolledBack = false;
+    vi.spyOn(api, "document").mockImplementation(async () => (rolledBack ? serverCopy(5, "v5") : notModified));
+    const put = vi.spyOn(api, "putDocument").mockResolvedValue({ etag: etag(11), revision: 11, mutationId: "x", updatedAt: 0 });
+    const h = start({ revision: 10, text: "v10" });
+    const bridge = (h.engine as unknown as { bridge: { encryptDocument: (input: unknown) => Promise<unknown> } }).bridge;
+    const encrypt = bridge.encryptDocument;
+    let releaseEncryption!: () => void;
+    const encryptionGate = new Promise<void>((resolve) => { releaseEncryption = resolve; });
+    bridge.encryptDocument = async (input) => { await encryptionGate; return encrypt(input); };
+    h.type("v10 + more");
+    await vi.advanceTimersByTimeAsync(400); // the payload is being encrypted
+    rolledBack = true;
+    h.focus();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    releaseEncryption();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(put).not.toHaveBeenCalled();
+    h.engine.stop();
+  });
+
+  it("spec: after a refused rollback, the copy that blocked a save raises no conflict question", async () => {
+    let rolledBack = false;
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === undefined) {
+        await readGate; // the read made for the 412
+        return serverCopy(11, "phone");
+      }
+      return rolledBack ? serverCopy(5, "v5") : notModified;
+    });
+    vi.spyOn(api, "putDocument").mockRejectedValue(new ApiRequestError(412, "PRECONDITION_FAILED", "stale"));
+    const conflicts: string[] = [];
+    const h = start({ revision: 10, text: "v10" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.type("v10 + more");
+    await vi.advanceTimersByTimeAsync(400);
+    rolledBack = true;
+    h.focus();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    releaseRead();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(conflicts).toEqual([]);
+    // The copy that arrived after the refusal was not taken in as "seen".
+    expect(new RevisionGuard(DOC_ID, h.storage).current()).toBe(10);
+    h.engine.stop();
+  });
+
+  it("spec: after a refused rollback, a newer copy that was still being opened is not applied", async () => {
+    const answers = [serverCopy(11, "newer"), serverCopy(5, "v5")];
+    vi.spyOn(api, "document").mockImplementation(async () => answers.shift() ?? notModified);
+    vi.spyOn(api, "putDocument").mockRejectedValue(new Error("must not be called"));
+    const h = start({ revision: 10, text: "v10" });
+    const bridge = (h.engine as unknown as { bridge: { decryptDocument: (input: unknown) => Promise<unknown> } }).bridge;
+    const decrypt = bridge.decryptDocument;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let decryptions = 0;
+    bridge.decryptDocument = async (input) => {
+      decryptions += 1;
+      if (decryptions === 1) await firstGate;
+      return decrypt(input);
+    };
+    h.focus(); // read 1: r11, slow to open
+    await vi.advanceTimersByTimeAsync(20);
+    h.focus(); // read 2: an older copy — refused
+    await vi.advanceTimersByTimeAsync(20);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(h.applied).toEqual([]);
+    expect(h.editor.text).toBe("v10");
+    h.engine.stop();
+  });
+
+  it("spec: a locked page never deletes a draft, whatever arrives afterwards", async () => {
+    // Lock while a save is in flight: the draft is stored, the engine stopped.
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload) => {
+      const body = payload as { mutationId: string; encryptedRevision: number };
+      await answerGate;
+      return { etag: etag(body.encryptedRevision), revision: body.encryptedRevision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const h = start({ revision: 10, text: "v10" });
+    h.type("v10 + more");
+    await vi.advanceTimersByTimeAsync(400);
+    await h.engine.persistDraftNow();
+    h.engine.stop();
+    const clearedAtLock = draftStore.cleared;
+    releaseAnswer();
+    await vi.advanceTimersByTimeAsync(30_000);
+    // The next session may already be writing its own draft under this key.
+    expect(draftStore.cleared).toBe(clearedAtLock);
+  });
+
+  it("spec: an answer to the conflict question given after the page was locked changes nothing", async () => {
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => (known === undefined ? serverCopy(11, "phone") : notModified));
+    vi.spyOn(api, "putDocument").mockRejectedValue(new ApiRequestError(412, "PRECONDITION_FAILED", "stale"));
+    let answer!: (decision: "keep-local" | "use-remote") => void;
+    const answered = new Promise<"keep-local" | "use-remote">((resolve) => { answer = resolve; });
+    const h = start({ revision: 10, text: "v10" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = () => answered;
+    h.type("v10 + more");
+    await vi.advanceTimersByTimeAsync(400); // the question is open
+    await h.engine.persistDraftNow();
+    h.engine.stop(); // locked
+    const clearedAtLock = draftStore.cleared;
+    answer("use-remote");
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(h.applied).toEqual([]);
+    expect(draftStore.cleared).toBe(clearedAtLock);
+  });
+
+  it("spec: the base is a copy of its own — later changes to the object it came from are not mistaken for edits", async () => {
+    // The app keeps the applied remote document as its state and registers an
+    // upload in that object's media map before the block is inserted. The
+    // engine's base must not change with it: the screen is still what the
+    // server holds, and a change that changes nothing must send nothing.
+    const get = vi.spyOn(api, "document").mockResolvedValue(serverCopy(6, "v6"));
+    const put = vi.spyOn(api, "putDocument").mockRejectedValue(new Error("must not be called"));
+    const h = start({ revision: 5, text: "v5" });
+    let appState: DocumentModel | null = null;
+    const callbacks = (h.engine as unknown as { callbacks: { applyRemote: (remote: DocumentModel) => void } }).callbacks;
+    callbacks.applyRemote = (remote) => {
+      appState = remote;
+      h.editor.text = (remote.blocks[0] as { text: string }).text;
+    };
+    h.focus(); // r6 is applied; the app holds that object as its state
+    await vi.advanceTimersByTimeAsync(20);
+    get.mockResolvedValue(notModified);
+    expect(h.editor.text).toBe("v6");
+    // An upload completes and is registered; its block is not inserted yet.
+    appState!.media.uploaded = { kind: "image", name: "a.png", mime: "image/png", plainBytes: 1 } as never;
+    h.engine.noteCommittedChange(); // a cancelled composition
+    await vi.advanceTimersByTimeAsync(5000);
+    expect.soft(put).not.toHaveBeenCalled();
+    expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
+    h.engine.stop();
+  });
+
+  it("spec: a page whose base ETag came from a draft still takes in the newer copy when nothing is left to save", async () => {
+    // The adopted draft is undone before its save goes out: the screen is the
+    // loaded copy again and nothing is unsaved. The ETag still names r6, which
+    // this page has not opened — asking "anything newer than r6?" would be
+    // answered "no" for ever, and r6 would never reach the screen.
+    const server = { revision: 6, text: "v5 a", mutationId: "other" };
+    const validators: Array<string | undefined> = [];
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      validators.push(known);
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    const put = vi.spyOn(api, "putDocument").mockRejectedValue(new Error("must not be called"));
+    const h = start({ revision: 5, text: "v5" });
+    h.editor.text = "v5 b"; // the adopted draft
+    h.engine.setBaseFromDraft(etag(6));
+    h.engine.noteCommittedChange();
+    h.type("v5"); // undone at once
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect.soft(put).not.toHaveBeenCalled();
+    expect.soft(h.applied).toEqual(["v5 a"]);
+    expect.soft(h.editor.text).toBe("v5 a");
+    // Once the copy has really been opened, reads are conditional again.
+    expect(validators.at(-1)).toBe(etag(6));
+    h.engine.stop();
+  });
+
+  it("spec: a locked page stores no draft of its own afterwards, even when its last save meets a server that went back", async () => {
+    // Lock while a save is in flight. Another tab has opened a newer copy, so
+    // the server accepting this save means it went back — but this page is
+    // locked: it must not capture "the screen" (now blank, or the next
+    // session's) over the draft stored at the lock.
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload) => {
+      const body = payload as { mutationId: string; encryptedRevision: number };
+      await answerGate;
+      return { etag: etag(body.encryptedRevision), revision: body.encryptedRevision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const h = start({ revision: 10, text: "v10" });
+    new RevisionGuard(DOC_ID, h.storage).record(11); // another tab opened r11
+    h.type("v10 + unsynced");
+    await vi.advanceTimersByTimeAsync(400); // the save (sealed for r11) is in flight
+    await h.engine.persistDraftNow();
+    h.engine.stop(); // locked
+    h.editor.text = ""; // the editor is emptied behind the gate
+    const draftsAtLock = draftStore.saved.length;
+    expect(draftStore.saved.at(-1)).toContain("unsynced");
+    releaseAnswer();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(draftStore.saved.length).toBe(draftsAtLock);
+    expect(draftStore.cleared).toBe(0);
+  });
+
+  it("spec: a save acknowledged after the lock still raises the mark of what this device has sealed", async () => {
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    let releaseAnswer!: () => void;
+    const answerGate = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload) => {
+      const body = payload as { mutationId: string; encryptedRevision: number };
+      await answerGate;
+      return { etag: etag(body.encryptedRevision), revision: body.encryptedRevision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const h = start({ revision: 10, text: "v10" });
+    h.type("v10 + more");
+    await vi.advanceTimersByTimeAsync(400);
+    h.engine.stop();
+    releaseAnswer();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(new RevisionGuard(DOC_ID, h.storage).current()).toBe(11);
+  });
+
+  it("spec: a draft whose base is the loaded copy under the edge's weak ETag is not treated as another copy", async () => {
+    // The previous build stored the ETag as the edge sent it (`W/"…"`). The
+    // draft's base IS the copy this page loaded: reads stay conditional, and
+    // the page's own save in flight is not mistaken for someone else's.
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    const strong = (value: string): string => value.replace(/^W\//, "");
+    const validators: Array<string | undefined> = [];
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      validators.push(known);
+      if (known !== undefined && strong(known) === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let puts = 0;
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts += 1;
+      if (puts === 1) await firstGate; // on its way; not stored yet
+      // The Worker accepts either form of the ETag.
+      if (strong(ifMatch) !== etag(server.revision) || body.encryptedRevision !== server.revision + 1) {
+        throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      }
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.editor.text = "v5 x"; // the adopted draft
+    h.engine.setBaseFromDraft(`W/${etag(5)}`);
+    h.engine.noteCommittedChange();
+    await vi.advanceTimersByTimeAsync(400); // its save is on its way
+    h.type("v5"); // the user deletes the "x" again
+    h.focus(); // a read overtakes the save
+    await vi.advanceTimersByTimeAsync(50);
+    expect.soft(validators.at(-1)).toBe(etag(5)); // conditional, and in the strong form
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect.soft(h.applied).toEqual([]);
+    expect.soft(conflicts).toEqual([]);
+    expect.soft(h.editor.text).toBe("v5");
+    expect(server.text).toBe("v5");
     h.engine.stop();
   });
 });

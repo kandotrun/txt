@@ -47,11 +47,15 @@ bash scripts/smoke-prod.sh   # 本番スモーク（txt.2-38.com）
 - `wrangler dev` はアセットマニフェストを起動時に固定する。Web をビルドしたら dev サーバーを
   再起動する（`scripts/dev.sh` がこれを行う）。再起動しないと `/` が 500 になる。
 - Cloudflare のエッジは origin の ETag を弱形式（`W/"..."`）に書き換えることがある。
-  ETag 比較は `normalizeEtag()` を通す。
+  ETag 比較は `normalizeEtag()` を通す。クライアントは `api.document()` で受け取った ETag を強形式にそろえて保持する
+  （保持している ETag 同士を文字列で比較するため）。
 - `__Host-` プレフィックスの Cookie は http では保存されない。ローカル開発は `txt_session` を使う
   （`sessionCookieName()`）。
 - `.dev.vars` はテスト環境では読み込まれない。テストは `vitest.worker.config.ts` の bindings を使う。
 - CSP は `unsafe-inline` を許可しない。インラインスクリプトを足す代わりに DOM へ値を注入する。
+- 文書の読み取り（`GET /api/v1/document`、304 を含む）は常に最新の行を返す前提でクライアントが動く。
+  D1 の読み取りレプリケーションやこの応答のキャッシュを有効にしない。古い版・古い 304 は巻き戻し検知
+  （spec §10.4）が「サーバーが過去へ戻った」と判定し、そのページの同期を止める。
 - `_headers` ファイルが静的アセットのセキュリティヘッダとキャッシュ方針を持つ。HTML を no-store に
   保たないと Cloudflare のキャッシュが古いシェルを配る。
 

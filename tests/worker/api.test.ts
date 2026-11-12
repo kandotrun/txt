@@ -570,6 +570,45 @@ describe("document CAS and idempotency", () => {
     expect(await response.text()).toBe("");
   });
 
+  it("spec: the ETag sent with a body is the one of that body, even when a save lands during the read", async () => {
+    // GET reads the document's metadata (for the conditional check) and then
+    // the row. A save landing between the two must not leave the older
+    // revision's ETag next to the newer copy: the client's next save would be
+    // refused against the very copy it is editing.
+    let saved = false;
+    const db = new Proxy(TEST_ENV.DB, {
+      get(target, property) {
+        if (property === "prepare") return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (!/SELECT id, sync_epoch, revision FROM documents/.test(sql)) return statement;
+          return { bind(...values: unknown[]) {
+            const bound = statement.bind(...values);
+            return { async first<T>() {
+              const row = await bound.first<T>();
+              if (!saved) {
+                saved = true;
+                expect((await putDocument(account, etag, documentPutBody())).status).toBe(200);
+              }
+              return row;
+            } };
+          } } as unknown as D1PreparedStatement;
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const response = await worker.fetch(
+      new Request(`${BASE}/api/v1/document`, { headers: { cookie: account.cookie } }),
+      { ...env, DB: db } as Env,
+      createExecutionContext(),
+    );
+    expect(response.status).toBe(200);
+    expect(saved).toBe(true);
+    const body = (await response.json()) as { revision: number; documentId: string };
+    expect(body.revision).toBe(1);
+    expect(response.headers.get("etag")).toBe(`"d-${body.documentId}-e-1-r1"`);
+  });
+
   it("saves conditionally and returns the new ETag only", async () => {
     const response = await putDocument(account, etag, documentPutBody());
     expect(response.status).toBe(200);

@@ -101,7 +101,12 @@ export class RevisionGuard {
   reset(encryptedRevision: number): void {
     this.resets += 1;
     this.seen = encryptedRevision;
-    this.write(encryptedRevision);
+    if (!this.write(encryptedRevision)) {
+      // Private mode or quota: the store still holds the higher mark and
+      // cannot be changed. From here on the in-memory mark is the only one
+      // this page has — consulting the store would override the reset.
+      this.storage = null;
+    }
   }
 
   /**
@@ -138,14 +143,18 @@ export class RevisionGuard {
     }
   }
 
-  private write(encryptedRevision: number): void {
+  /**
+   * False when the store refused the value. A raise that could not be stored
+   * loses nothing on this page (the in-memory mark already holds it), and the
+   * store stays in use: other tabs' marks are still read from it, and the next
+   * raise is tried again.
+   */
+  private write(encryptedRevision: number): boolean {
     try {
       this.storage?.setItem(this.key, String(encryptedRevision));
+      return true;
     } catch {
-      // Private mode or quota. From here on the in-memory mark is the only
-      // one this page has: stop consulting a store that cannot be updated, or
-      // its stale value would override an explicit reset.
-      this.storage = null;
+      return false;
     }
   }
 }

@@ -4,6 +4,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
+import { api } from "../../apps/web/src/app/api.ts";
 import { debugHookAllowed } from "../../apps/web/src/app/debug-hook.ts";
 import { renderableMime } from "../../apps/web/src/app/media-types.ts";
 import { createScriptUrlPolicy, isTrustedScriptUrl } from "../../apps/web/src/app/trusted-types.ts";
@@ -117,5 +118,27 @@ describe("static security headers", () => {
     expect.soft(block("/assets/*")).toContain("Cross-Origin-Resource-Policy: same-origin");
     expect.soft(block("/sw.js")).toContain("Cross-Origin-Resource-Policy: same-origin");
     expect(() => renderStaticHeaders("/*\n  X: __UNKNOWN__\n")).toThrow(/unknown placeholder/);
+  });
+});
+
+describe("document ETags on the client", () => {
+  it("spec: the ETag kept for a copy is the same string whether or not the edge weakened it", async () => {
+    // Cloudflare's edge may rewrite the origin's ETag into its weak form. The
+    // client compares the ETags it holds with each other (a draft's base with
+    // the loaded copy's), so it keeps one form only.
+    const body = JSON.stringify({ documentId: "d", encryptedRevision: 3 });
+    const answer = (etag: string): Response => new Response(body, { status: 200, headers: { etag, "content-type": "application/json" } });
+    const fetchStub = vi.fn<(...args: unknown[]) => Promise<Response>>();
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      fetchStub.mockResolvedValueOnce(answer('W/"d-1-e-1-r3"'));
+      const weakened = await api.document();
+      fetchStub.mockResolvedValueOnce(answer('"d-1-e-1-r3"'));
+      const untouched = await api.document();
+      expect(weakened.etag).toBe('"d-1-e-1-r3"');
+      expect(untouched.etag).toBe('"d-1-e-1-r3"');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

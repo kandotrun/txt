@@ -297,7 +297,11 @@ class ApiClient {
       throw new ApiRequestError(response.status, code, message);
     }
     const data = (await response.json()) as DocumentResponse;
-    return { data, etag: response.headers.get("etag") ?? undefined, notModified: false };
+    // The edge may have rewritten the ETag into its weak form (`W/"…"`). The
+    // server accepts either; the client compares the ETags it holds with each
+    // other, so it keeps the strong form only.
+    const current = response.headers.get("etag")?.replace(/^W\//, "");
+    return { data, etag: current || undefined, notModified: false };
   }
 
   putDocument(payload: Record<string, unknown>, etag: string) {

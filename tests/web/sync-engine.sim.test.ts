@@ -3,10 +3,10 @@
  *
  * The directed tests in sync-engine.test.ts pin down known cases. This one
  * goes looking for the ones nobody thought of: a seeded generator mixes
- * typing, undo, changes that change nothing, IME compositions, focus and
- * visibility events, latency, lost answers, offline periods, 429/503, and
- * optionally a second device, against a server that follows the Worker's CAS
- * rules. After every run the oracles below must hold. A failure prints the
+ * typing, undo, changes that change nothing, IME compositions, uploads that
+ * finish behind the conflict question, focus and visibility events, latency,
+ * lost answers, offline periods, 429/503, and optionally a second device,
+ * against a server that follows the Worker's CAS rules. After every run the oracles below must hold. A failure prints the
  * seed and the trace, so it can be replayed exactly.
  *
  * Oracles:
@@ -141,7 +141,7 @@ async function simulate(options: SimOptions): Promise<SimResult> {
   const server = new Server(5, "base");
   /**
    * Index, in the server's history, of the newest version the page has taken
-   * in (saved itself, applied, or asked about). Text on screen is "on the
+   * in (saved itself, applied, found equal to the screen, or asked about). Text on screen is "on the
    * server" when the server held exactly that text at or after this point;
    * anything else is the user's unsaved work — including text that equals an
    * OLDER version (the user went back to it), which must be saved again.
@@ -243,10 +243,11 @@ async function simulate(options: SimOptions): Promise<SimResult> {
         versionOf.set(copy, server.indexOf(input.encryptedRevision));
         return copy;
       },
-      encryptDocument: async (input: { document: DocumentModel; encryptedRevision: number }) => ({
-        nonce: "n",
-        ciphertext: `${input.encryptedRevision}:${textOf(input.document)}`,
-      }),
+      encryptDocument: async (input: { document: DocumentModel; encryptedRevision: number }) => {
+        // If this save is stored it becomes that version (and the page's base).
+        versionOf.set(input.document, server.indexOf(input.encryptedRevision));
+        return { nonce: "n", ciphertext: `${input.encryptedRevision}:${textOf(input.document)}` };
+      },
     } as never,
     callbacks: {
       getDocument: () => docOf(editor.text),
@@ -262,6 +263,11 @@ async function simulate(options: SimOptions): Promise<SimResult> {
         syncedAt = Math.max(syncedAt, versionOf.get(remote) ?? server.history.lastIndexOf(next));
       },
       onState: (state, detail) => {
+        // A read that finds server and screen equal adopts that version as
+        // the base without applyRemote: the page has taken it in. (Going back
+        // to an older text after that is a change, and must be saved again.)
+        const base = server.indexOf((engine as unknown as { baseRevision: number }).baseRevision);
+        if (base > syncedAt && server.history[base] === editor.text) syncedAt = base;
         states.push(state);
         trace.push(`  state: ${state}${detail ? ` (${detail.slice(0, 16)})` : ""}`);
       },
@@ -272,7 +278,9 @@ async function simulate(options: SimOptions): Promise<SimResult> {
         const decision = options.decision === "random" ? (rand() < 0.5 ? "keep-local" : "use-remote") : options.decision;
         trace.push(`  page: CONFLICT local "${textOf(local)}" remote "${textOf(remote)}" -> ${decision}`);
         questionOpen = true;
-        await delay(pick(1500));
+        // Usually answered quickly; sometimes the question stays open for a
+        // while, and several polls come and go behind it.
+        await delay(rand() < 0.3 ? 1500 + pick(10_000) : pick(1500));
         questionOpen = false;
         if (decision === "use-remote") {
           applyingChosenRemote = true;
@@ -334,7 +342,16 @@ async function simulate(options: SimOptions): Promise<SimResult> {
 
   for (let step = 0; step < options.steps; step += 1) {
     let r = rand();
-    if (questionOpen && composingFrom === null && r < 0.40) r += 0.40; // no user input behind the question
+    if (questionOpen && composingFrom === null && r < 0.40) {
+      // The question is modal: the user cannot type behind it. An upload that
+      // was already running can still finish, and the app inserts its block.
+      if (rand() < 0.2) {
+        edited(`${editor.text}+a${(counter += 1)}`);
+        trace.push(`app: an upload finishes behind the question -> "${editor.text}"`);
+        continue;
+      }
+      r += 0.40;
+    }
     if (composingFrom !== null) {
       // While composing only time passes, reads happen, or the composition ends.
       if (r < 0.35) {
@@ -437,7 +454,7 @@ describe("SyncEngine under random interleavings", () => {
   it.each([
     { name: "one device", foreign: false, decision: "keep-local" as const, slow: false, steps: 30, seeds: 800 },
     { name: "one device, slow answers", foreign: false, decision: "keep-local" as const, slow: true, steps: 40, seeds: 800 },
-    { name: "another device writing, either answer to a conflict", foreign: true, decision: "random" as const, slow: false, steps: 30, seeds: 800 },
+    { name: "another device writing, either answer to a conflict", foreign: true, decision: "random" as const, slow: false, steps: 30, seeds: 1000 },
     { name: "another device writing, slow answers", foreign: true, decision: "keep-local" as const, slow: true, steps: 50, seeds: 1500 },
     { name: "another device writing, always taking the server copy, long runs", foreign: true, decision: "use-remote" as const, slow: true, steps: 60, seeds: 400 },
   ])("spec: no typed text is lost, overwritten or left unsaved — $name", async ({ foreign, decision, slow, steps, seeds }) => {
