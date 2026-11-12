@@ -9,17 +9,12 @@
  */
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 export const MAX_U64 = 0xffffffffffffffffn;
 
 /** UTF-8 bytes of a string, for `Encode` string fields and HKDF info. */
 export function utf8(s: string): Uint8Array {
   return encoder.encode(s);
-}
-
-export function utf8Decode(bytes: Uint8Array): string {
-  return decoder.decode(bytes);
 }
 
 /**
@@ -112,13 +107,4 @@ export function concat(...parts: Uint8Array[]): Uint8Array {
     offset += p.byteLength;
   }
   return out;
-}
-
-export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.byteLength !== b.byteLength) return false;
-  let diff = 0;
-  for (let i = 0; i < a.byteLength; i++) {
-    diff |= (a[i] as number) ^ (b[i] as number);
-  }
-  return diff === 0;
 }

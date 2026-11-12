@@ -27,7 +27,6 @@ export const KEY_VERSION = 1;
 export const MAX_BLOCKS = 2000;
 export const MAX_MEDIA = 200;
 export const MAX_DOCUMENT_JSON_BYTES = 1_048_576; // 1MiB before encryption
-export const MAX_UPDATE_REQUEST_BYTES = 2_097_152; // 2MiB
 
 export const MEDIA_KINDS = ["image", "video", "audio"] as const;
 export type MediaKind = (typeof MEDIA_KINDS)[number];
@@ -56,11 +55,6 @@ export interface MediaInfo {
   chunkCount: number;
   noncePrefix: string; // base64url 8 bytes
   fileKey: string; // base64url 32 bytes
-}
-
-export interface SerializedMediaInfo extends MediaInfo {
-  /** Ciphertext size on the wire (plainBytes + one tag per chunk). */
-  cipherBytes: number;
 }
 
 export interface DocumentModel {
@@ -111,16 +105,6 @@ export function serializeDocument(doc: DocumentModel): string {
     media[key] = serializeMedia(doc.media[key] as MediaInfo);
   }
   return JSON.stringify({ schemaVersion: doc.schemaVersion, blocks, media });
-}
-
-export function parseDocument(bytes: Uint8Array): DocumentModel {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes));
-  } catch {
-    throw new DocumentFormatError("document is not valid JSON");
-  }
-  return validateOrThrow(parsed);
 }
 
 export class DocumentFormatError extends Error {
@@ -358,28 +342,6 @@ export function repairOrphanedMedia(
   // document as unreadable exactly as before.
   if (validateDocument(document).length > 0) return null;
   return { document, dropped };
-}
-
-const KIND_LABELS: Record<MediaKind, string> = {
-  image: "画像",
-  video: "動画",
-  audio: "音声",
-};
-
-/** Plaintext view for the clipboard; media becomes `[画像: name]` (spec §8). */
-export function plainTextForCopy(doc: DocumentModel): string {
-  const parts: string[] = [];
-  for (const block of doc.blocks) {
-    if (block.type === "text") {
-      parts.push(block.text);
-    } else {
-      const info = doc.media[block.mediaId];
-      const label = info ? KIND_LABELS[info.kind] : "メディア";
-      const name = info ? info.name : "";
-      parts.push(`[${label}: ${name}]`);
-    }
-  }
-  return parts.join("");
 }
 
 export function documentJsonBytes(doc: DocumentModel): number {

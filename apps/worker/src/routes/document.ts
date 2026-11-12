@@ -88,11 +88,9 @@ routes.get("/document", async (c) => {
 });
 
 /**
- * Shared PUT tail for both authorization sources (design §7.2): the CAS
- * contract — If-Match required, encryptedRevision checked against the
- * stored revision, mutationId idempotency, 412/409/422 separation in
- * `applyDocumentUpdate` — is identical whether the writer is the Web
- * session or an agent token. Only the account resolution differs.
+ * The CAS contract of PUT /document: If-Match required, encryptedRevision
+ * checked against the stored revision, mutationId idempotency, and the
+ * 412/409/422 separation in `applyDocumentUpdate`.
  */
 async function applyDocumentPut(c: AppContext, accountId: string) {
   const ifMatch = c.req.header("if-match");

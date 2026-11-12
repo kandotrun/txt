@@ -36,6 +36,7 @@ import type { SyncState } from "./sync.ts";
 import {
   addPasskey,
   loginAndUnlock,
+  recoverWithKey,
   registerAccount,
   rotateRecoveryKey,
   unlockExisting,
@@ -404,8 +405,7 @@ function mediaInfo(mediaId: string): MediaInfo | undefined {
   return state.document.media[mediaId];
 }
 
-function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLElement {
-  void _blockId;
+function renderMedia(mediaId: string, info: MediaInfo): HTMLElement {
   const container = document.createElement("div");
   container.className = "txt-media";
   container.setAttribute("data-media-id", mediaId);
@@ -431,8 +431,15 @@ function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLEl
         void materializeStream(img, mediaId, info);
       }
     }, { once: true });
-    void materializeStream(img, mediaId, info);
     container.append(img);
+    // Marked now so a stream refresh can find it; the source itself is only
+    // assigned when the image comes near the viewport (spec §11.6).
+    img.dataset.swMedia = mediaId;
+    img.dataset.deferred = "1";
+    materializeWhenVisible(container, () => {
+      delete img.dataset.deferred;
+      void materializeStream(img, mediaId, info);
+    });
     return container;
   }
 
@@ -494,6 +501,8 @@ function clearStreamSources(): void {
 
 function refreshStreamSources(): void {
   for (const node of elements.editorHost.querySelectorAll<HTMLImageElement | HTMLMediaElement>("[data-sw-media]")) {
+    // An image still waiting to scroll into view keeps waiting.
+    if (node.dataset.deferred) continue;
     const mediaId = node.dataset.swMedia!;
     const info = mediaInfo(mediaId);
     if (info) void materializeStream(node, mediaId, info);
@@ -732,16 +741,6 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     if (generation !== state.sessionGeneration) { bridge.lock(); return; }
     if (!first.data) throw new Error(t("文書を取得できません。"));
     state.documentId = first.data.documentId;
-    // Rollback detection (spec §10.4): refuse a copy older than one this
-    // device has already seen, unless the user just chose to open it.
-    const revisions = new RevisionGuard(first.data.documentId, markStorage());
-    if (acceptOlderCopy) revisions.reset(first.data);
-    if (!revisions.accepts(first.data)) {
-      throw new RollbackError(
-        t("サーバーの内容が、この端末で以前に開いた版より古くなっています"),
-        { syncEpoch: first.data.syncEpoch, revision: first.data.revision },
-      );
-    }
     if (window.__txtDebug) window.__txtDebug.step = "session:document-done";
 
     await bridge.unlock({
@@ -781,8 +780,21 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
       ciphertext: first.data.ciphertext,
     });
     if (window.__txtDebug) window.__txtDebug.step = "session:decrypted";
-    revisions.record(first.data);
+
+    // Rollback detection (spec §10.4). The copy has just been decrypted, so
+    // its encryptedRevision is authenticated: refuse one older than this
+    // device has already opened, unless the user just chose to open it.
+    const revisions = new RevisionGuard(first.data.documentId, markStorage());
+    if (acceptOlderCopy) revisions.reset(first.data.encryptedRevision);
+    if (!revisions.accepts(first.data.encryptedRevision)) {
+      throw new RollbackError(t("サーバーの内容が、この端末で以前に開いた版より古くなっています"));
+    }
+    revisions.record(first.data.encryptedRevision);
     sessionRevisions = revisions;
+
+    // The editor engine is fetched before anything is published: if the chunk
+    // cannot be loaded, the failure is handled below with nothing unlocked.
+    const editorModule = state.editor ? null : await loadEditorModule();
 
   if (generation !== state.sessionGeneration) { bridge.lock(); return; }
   state.unlocked = vault;
@@ -793,8 +805,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
 
   let editor = state.editor;
   if (!editor) {
-    const { Editor } = await loadEditorModule();
-    if (generation !== state.sessionGeneration) return;
+    const { Editor } = editorModule ?? (await loadEditorModule());
     editor = new Editor(
       elements.editorHost,
       {
@@ -841,23 +852,25 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
         // draft valid (spec §8).
         return pruneUnreferencedMedia(model);
       },
-      applyRemote: (remote, { fromAdoption }) => {
+      applyRemote: (remote) => {
         if (generation !== state.sessionGeneration) return;
         // Media that is unchanged keeps its element — and a playing video
         // keeps playing — so streams are only reset when something this page
         // is showing was removed or replaced (spec §9.8).
-        const shown = Object.entries(state.document.media);
-        if (shown.some(([mediaId, info]) => !sameMedia(remote.media[mediaId], info))) clearStreamSources();
+        const rendered = [...elements.editorHost.querySelectorAll<HTMLElement>("[data-media-id]")]
+          .map((node) => node.dataset.mediaId ?? "");
+        const replaced = rendered.some((mediaId) => {
+          const info = state.document.media[mediaId];
+          return info !== undefined && !sameMedia(remote.media[mediaId], info);
+        });
+        if (replaced) clearStreamSources();
         state.document = remote;
         void syncServiceWorkerMedia();
-        if (fromAdoption) {
-          // Clearing history avoids undoing back into the previous version
-          // (spec §9.7).
-          state.editor?.applyRemoteDocument(remote);
-          state.editor?.clearHistory();
-        } else {
-          state.editor?.applyRemoteDocument(remote);
-        }
+        // The editor drops its undo history with every applied remote copy:
+        // Undo must never reach back across what another device saved, and
+        // must not revive a block whose media is no longer in the document
+        // (spec §9.7).
+        state.editor?.applyRemoteDocument(remote);
         updateEmptyHint();
         // A remote copy that carried unreferenced media entries was opened with
         // them dropped; persist the repaired model so the stored document stops
@@ -873,11 +886,15 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
           for (const img of elements.editorHost.querySelectorAll<HTMLImageElement>("img[data-sw-media]")) {
             const mediaId = img.dataset.swMedia!;
             const info = mediaInfo(mediaId);
-            if (info && img.complete && img.naturalWidth === 0) void materializeStream(img, mediaId, info);
+            // A freshly attached image 404s until its reference is saved; retry
+            // it now. Images still waiting to scroll into view are left alone.
+            if (info && !img.dataset.deferred && img.complete && img.naturalWidth === 0) {
+              void materializeStream(img, mediaId, info);
+            }
           }
         }
       },
-      onConflict: async ({ local, remote, remoteEtag }) => {
+      onConflict: async ({ local, remote }) => {
         const localPreview = window.document.createElement("pre");
         localPreview.textContent = serializeDocument(local);
         const remotePreview = window.document.createElement("pre");
@@ -896,7 +913,6 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
             { label: t("サーバーの内容を使う"), value: "use-remote", primary: false },
           ],
         });
-        void remoteEtag;
         return decision === "use-remote" ? "use-remote" : "keep-local";
       },
       isSafePoint: () => state.editor?.isSafePoint() ?? true,
@@ -914,15 +930,6 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
   state.sync = sync;
   sync.start();
 
-  // A document that arrived with unreferenced media entries was opened with
-  // those entries dropped (spec §8). Persist the repaired model once so every
-  // client — including ones that do not implement the repair — sees a clean
-  // document; otherwise the stored copy stays broken forever.
-  if (bridge.lastDroppedMediaIds.length > 0) {
-    toast(t("添付情報の整合性を修復しました。"), 4000);
-    sync.noteCommittedChange();
-  }
-
   // Local draft recovery (§9.6, §10.6): a draft is only meaningful when it
   // holds input the server does not have yet. Committed snapshots are dropped
   // once saved, so anything left here is either unsynced or provisional.
@@ -938,6 +945,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
   // equals the server copy is a leftover of a best-effort clear and is dropped
   // without asking.
   let recovered: DocumentModel | null = null;
+  let draftAdopted = false;
   if (draft) {
     try {
       recovered = pruneUnreferencedMedia(JSON.parse(draft.documentJson) as DocumentModel);
@@ -949,15 +957,21 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     await clearDraft({ accountId: vault.accountId, documentId: state.documentId });
     if (generation !== state.sessionGeneration) return;
   } else if (draft) {
-    const decision = await showDialog({
-      title: draft.provisional ? t("未確定の入力が残っています") : t("未同期の入力が残っています"),
-      body: t("前回の続きがあります。採用しますか。"),
-      actions: [
-        { label: t("採用する"), value: "accept", primary: true },
-        { label: t("破棄する"), value: "discard", primary: false },
-      ],
-    });
-    if (generation !== state.sessionGeneration) return;
+    // The question must be answered. Leaving it open (Escape, the Back
+    // gesture) is neither choice, and going on to the editor would let the
+    // next keystroke overwrite the stored draft with the server copy.
+    let decision = "";
+    while (decision !== "accept" && decision !== "discard") {
+      decision = await showDialog({
+        title: draft.provisional ? t("未確定の入力が残っています") : t("未同期の入力が残っています"),
+        body: t("前回の続きがあります。採用しますか。"),
+        actions: [
+          { label: t("採用する"), value: "accept", primary: true },
+          { label: t("破棄する"), value: "discard", primary: false },
+        ],
+      });
+      if (generation !== state.sessionGeneration) return;
+    }
     if (decision === "accept") {
       try {
         if (!recovered) throw new Error("draft is unreadable");
@@ -975,6 +989,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
         // dialog decides — never a silent overwrite (spec §10.4).
         sync.setBaseFromDraft(draft.baseEtag);
         sync.noteCommittedChange();
+        draftAdopted = true;
       } catch {
         toast(t("保存済みの下書きを読み込めませんでした。"));
       }
@@ -986,13 +1001,27 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     }
   }
 
+  // A document that arrived with unreferenced media entries was opened with
+  // those entries dropped (spec §8). Persist the repaired model once so every
+  // client — including ones that do not implement the repair — sees a clean
+  // document; otherwise the stored copy stays broken forever. This runs after
+  // the draft question, so the repair can never overwrite a draft that is
+  // still waiting for an answer; an adopted draft is already being saved.
+  if (bridge.lastDroppedMediaIds.length > 0 && !draftAdopted) {
+    toast(t("添付情報の整合性を修復しました。"), 4000);
+    sync.noteCommittedChange();
+  }
+
   if (generation !== state.sessionGeneration) return;
   showApp();
-  setSyncState("idle");
+  if (!draftAdopted && bridge.lastDroppedMediaIds.length === 0) setSyncState("idle");
   editor.focus();
   } catch (error) {
-    // A worker that was handed the VaultKey must not outlive a failed start.
-    if (startedBridge && state.bridge !== startedBridge) startedBridge.lock();
+    // A failed start leaves nothing unlocked behind the error gate: not the
+    // worker that was handed the VaultKey, and — when the failure came after
+    // the session was published — not the session either.
+    if (startedBridge && state.bridge === startedBridge) releaseSession();
+    startedBridge?.lock();
     if (generation !== state.sessionGeneration) return;
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
@@ -1077,6 +1106,18 @@ function syncServiceWorkerMedia(): Promise<boolean> {
   return pending;
 }
 
+/**
+ * The browser may stop and restart the Service Worker at any time; the worker
+ * comes back without this page's media keys and asks for them (spec §11.6).
+ * One handshake answers any number of requests that arrive meanwhile.
+ */
+let rehandshake: Promise<void> | null = null;
+if (serviceWorkerBridge) navigator.serviceWorker.addEventListener("message", (event) => {
+  if ((event.data as { type?: unknown } | null)?.type !== "txt-need-handshake") return;
+  if (!state.unlocked || rehandshake) return;
+  rehandshake = setupServiceWorker(state.unlocked).finally(() => { rehandshake = null; });
+});
+
 if (serviceWorkerBridge) navigator.serviceWorker.addEventListener("controllerchange", () => {
   clearStreamSources();
   state.serviceWorkerReady = false;
@@ -1087,24 +1128,17 @@ if (serviceWorkerBridge) navigator.serviceWorker.addEventListener("controllercha
 /* Lock policy (spec §6.4)                                             */
 /* ------------------------------------------------------------------ */
 
-function lockVault(reason: string): void {
-  if (!state.unlocked) return;
-  if (state.editor && !state.editor.isSafePoint()) {
-    // Never force-commit marked text on lock; retry shortly instead (§9.6).
-    window.setTimeout(() => lockVault(reason), 1500);
-    return;
-  }
-  dismissCoach?.();
-  state.sessionGeneration += 1;
+/**
+ * Ends the unlocked session in this page: stops syncing and uploads, ends the
+ * crypto worker and the Service Worker session, and removes everything that
+ * was decrypted from memory and from the DOM. Does not change what is stored.
+ */
+function releaseSession(): void {
   serviceWorkerBridge?.reset();
   mediaReady = Promise.resolve(false);
   for (const entry of state.attaching.values()) entry.controller.abort();
   state.attaching.clear();
   renderAttachProgress();
-  // Lock protects what was typed: store the draft now, not a window later.
-  // The VaultKey encrypts that draft, so it is wiped only after the write.
-  const lockedKey = state.unlocked.vaultKey;
-  void (state.sync?.persistDraftNow() ?? Promise.resolve()).finally(() => lockedKey.fill(0));
   state.sync?.stop();
   state.sync = null;
   state.bridge?.lock();
@@ -1119,6 +1153,22 @@ function lockVault(reason: string): void {
   state.objectUrls.clear();
   state.document = { schemaVersion: 1, blocks: [], media: {} };
   state.editor?.replaceDocument({ schemaVersion: 1, blocks: [{ id: crypto.randomUUID(), type: "text", text: "" }], media: {} });
+}
+
+function lockVault(reason: string): void {
+  if (!state.unlocked) return;
+  if (state.editor && !state.editor.isSafePoint()) {
+    // Never force-commit marked text on lock; retry shortly instead (§9.6).
+    window.setTimeout(() => lockVault(reason), 1500);
+    return;
+  }
+  dismissCoach?.();
+  state.sessionGeneration += 1;
+  // Lock protects what was typed: store the draft now, not a window later.
+  // The VaultKey encrypts that draft, so it is wiped only after the write.
+  const lockedKey = state.unlocked.vaultKey;
+  void (state.sync?.persistDraftNow() ?? Promise.resolve()).finally(() => lockedKey.fill(0));
+  releaseSession();
   showGate({
     title: t("パスキーで開く"),
     body: reason,
@@ -1318,7 +1368,7 @@ async function recoveryFlow(): Promise<void> {
   elements.gateFootnote.textContent = t("復旧しています……");
   elements.gateFootnote.dataset.state = "idle";
   try {
-    const outcome = await (await import("./vault.ts")).recoverWithKey(value, confirmRecoveryKey);
+    const outcome = await recoverWithKey(value, confirmRecoveryKey);
     // The typed recovery key has been spent (it is rotated on completion).
     elements.recoveryInput.value = "";
     await startSession({

@@ -172,4 +172,34 @@ describe("page-specific Service Worker readiness", () => {
     expect(container.controller!.messages.filter(({ data }) => data.type === "txt-media-update")).toHaveLength(1);
     expect(bridge.ready).toBe(false);
   });
+  it("spec: a worker that lost its session refuses an update at once instead of leaving it to time out", async () => {
+    vi.useFakeTimers();
+    const invalidated = vi.fn();
+    const { container, channels } = transport();
+    const createChannel = (): MessageChannel => {
+      const lifecycle = { closed: 0 };
+      channels.push(lifecycle);
+      const port1 = { onmessage: null as ((event: MessageEvent) => void) | null, close: () => lifecycle.closed++, start() {} };
+      const port2 = { postMessage: (data: unknown) => port1.onmessage?.({ data } as MessageEvent), close: () => lifecycle.closed++ };
+      return { port1, port2 } as unknown as MessageChannel;
+    };
+    const bridge = new ServiceWorkerBridge(container as unknown as ServiceWorkerContainer, {
+      timeoutMs: 8000, createChannel, onInvalidated: invalidated,
+    });
+    const started = bridge.start(payload());
+    await flush();
+    container.controller!.ack(0);
+    expect(await started).toBe(true);
+    invalidated.mockClear();
+
+    // The browser stopped and restarted the worker: same controller object,
+    // empty memory. It answers the update by asking for the handshake again.
+    const update = bridge.updateMedia({});
+    await flush();
+    container.controller!.ack(1, { type: "txt-need-handshake" });
+    expect(await update).toBe(false);
+    expect(bridge.ready).toBe(false);
+    expect(invalidated).toHaveBeenCalledTimes(1);
+    bridge.reset();
+  });
 });

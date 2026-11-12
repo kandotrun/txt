@@ -35,7 +35,6 @@ export type ChallengePurpose =
   | "login"
   | "stepup"
   | "credential-add"
-  | "credential-activate"
   | "recovery-add";
 
 export interface ChallengeContext {
@@ -168,7 +167,9 @@ export async function consumeChallenge(
     .first<ChallengeRow>();
   if (!row || row.client_kind !== "web") throw badRequest("unknown or already consumed challenge");
   if (row.consumed_at !== null) throw conflict("challenge already used");
-  if (row.expires_at <= now) throw badRequest("challenge expired");
+  // Its own code: a client that had a human step between the two halves of a
+  // ceremony (recovery) recognises this and starts the ceremony again.
+  if (row.expires_at <= now) throw badRequest("challenge expired", "CHALLENGE_EXPIRED");
   if (!arrayBufferEqual(row.binding_hash32, options.binding)) {
     throw badRequest("challenge is bound to a different client");
   }

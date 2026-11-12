@@ -604,9 +604,156 @@ test("spec: サーバーが以前より古い版を返しても黙って適用�
   await expect(page.getByText("以前より古い内容です")).toBeVisible({ timeout: 30000 });
   await expect(page.locator("#app")).toBeHidden();
 
-  // Only an explicit choice opens it.
+  // Only an explicit choice opens it. The newer text that was on screen when
+  // the rollback was refused was kept on this device and is offered back.
   await page.getByRole("button", { name: "この古い版を開く" }).click();
+  await expect(page.getByText("未同期の入力が残っています")).toBeVisible({ timeout: 30000 });
+  // The dialog cannot be dismissed into losing the draft.
+  await page.keyboard.press("Escape");
+  await expect(page.getByText("未同期の入力が残っています")).toBeVisible();
+
+  // The server is honest again; restoring the kept text converges with it.
+  await page.unroute("**/api/v1/document");
+  await page.getByRole("button", { name: "採用する" }).click();
   await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
-  await expect(page.locator("#editor-host .ProseMirror")).toContainText("第一版。");
-  await expect(page.locator("#editor-host .ProseMirror")).not.toContainText("第二版の追記。");
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("第二版の追記。");
+  await waitForSync(page);
+});
+
+test("spec: 遠隔版の適用後もキャレットは本文に残り、Undoで他のタブの保存を巻き戻せない", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("hello");
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHUlEQVQoU2NkYGD4z0AEYBxVSFJIYWBgYPgPjQMAoBUGb0kC9XkAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await page.locator("#file-input").setInputFiles({ name: "t.png", mimeType: "image/png", buffer: png });
+  await expect(page.locator("#editor-host .txt-media")).toBeVisible({ timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+
+  // Caret at the end of the paragraph before the image.
+  await editor.locator("p").first().click();
+  await page.keyboard.press("End");
+
+  // Another tab extends that same paragraph and saves.
+  const second = await page.context().newPage();
+  await second.goto(BASE);
+  await expect(second.locator("#app")).toBeVisible({ timeout: 30000 });
+  await second.locator("#editor-host .ProseMirror p").first().click();
+  await second.keyboard.press("Home");
+  await second.keyboard.type("B:");
+  await waitForSync(second);
+  await expect(editor.locator("p").first()).toHaveText("B:hello", { timeout: 30000 });
+  await second.close();
+
+  // Typing without clicking: the character lands in that paragraph, and the
+  // image is neither selected nor replaced.
+  await page.bringToFront();
+  await page.keyboard.type("X");
+  await expect(editor.locator("p").first()).toContainText("X");
+  await expect(editor.locator(".txt-media")).toHaveCount(1);
+  const firstParagraph = (await editor.locator("p").first().textContent()) ?? "";
+  expect(firstParagraph.startsWith("B:hel")).toBe(true);
+
+  // Undo takes back this tab's own typing only. Before the history was cut at
+  // the remote apply, one more Undo reverted the image insertion and, with
+  // it, the whole document — including the other tab's saved text.
+  for (let step = 0; step < 4; step += 1) await page.keyboard.press("ControlOrMeta+z");
+  await expect(editor.locator("p").first()).toHaveText("B:hello");
+  await expect(editor.locator(".txt-media")).toHaveCount(1);
+});
+
+test("spec: 新しい復旧キーの保存中に手続きの期限が切れても、保存したその復旧キーで復旧が確定する", async ({ page, browser }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  const recoveryKey = await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+
+  const otherContext = await browser.newContext({ locale: "ja-JP" });
+  const other = await otherContext.newPage();
+  await installVirtualAuthenticator(other, { hasPrf: true });
+  // The first completion is answered as the server answers a ceremony that
+  // lapsed while the user was writing the key down.
+  let completions = 0;
+  await other.route("**/api/v1/recovery/complete", async (route) => {
+    completions += 1;
+    if (completions === 1) {
+      await route.fulfill({
+        status: 400,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ error: { code: "CHALLENGE_EXPIRED", message: "challenge expired" } }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await submitRecoveryKey(other, recoveryKey);
+  await expect(other.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  const savedKey = ((await other.locator("dialog pre").textContent()) ?? "").trim();
+  await other.getByRole("button", { name: "保存しました" }).click();
+  await expect(other.locator("#app")).toBeVisible({ timeout: 30000 });
+  expect(completions).toBe(2);
+  await otherContext.close();
+
+  // The key the user saved is the one in force: it starts a recovery.
+  const third = await browser.newContext({ locale: "ja-JP" });
+  const check = await third.newPage();
+  await installVirtualAuthenticator(check, { hasPrf: true });
+  await submitRecoveryKey(check, savedKey);
+  await expect(check.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await third.close();
+});
+
+test("spec: Service Workerが再起動して鍵を失っても、再読み込みなしでメディアを再び読める", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await page.locator("#editor-host .ProseMirror").click();
+  await page.locator("#file-input").setInputFiles({ name: "t.wav", mimeType: "audio/wav", buffer: silentWav() });
+  await expect(page.locator("#editor-host audio")).toBeAttached({ timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+  await page.waitForFunction(() => (document.querySelector("#editor-host audio") as HTMLAudioElement | null)?.getAttribute("src"), undefined, { timeout: 30000 });
+
+  // Stop the worker as a browser does when it has been idle: the next request
+  // starts a fresh instance that remembers nothing.
+  const client = await page.context().newCDPSession(page);
+  await client.send("ServiceWorker.enable");
+  await client.send("ServiceWorker.stopAllWorkers");
+  await page.waitForTimeout(500);
+
+  const loaded = await page.evaluate(async () => {
+    const attempt = (): Promise<boolean> => new Promise((resolve) => {
+      const audio = document.querySelector("#editor-host audio") as HTMLAudioElement;
+      const done = (ok: boolean): void => {
+        audio.removeEventListener("loadedmetadata", onLoaded);
+        audio.removeEventListener("error", onError);
+        resolve(ok);
+      };
+      const onLoaded = (): void => done(true);
+      const onError = (): void => done(false);
+      audio.addEventListener("loadedmetadata", onLoaded);
+      audio.addEventListener("error", onError);
+      audio.preload = "auto";
+      audio.load();
+      window.setTimeout(() => done(audio.readyState >= 1), 4000);
+    });
+    // The first load meets the restarted worker (423); the page answers its
+    // request for a handshake and assigns the stream again, with no reload.
+    for (let round = 0; round < 6; round += 1) {
+      if (await attempt()) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    return false;
+  });
+  expect(loaded).toBe(true);
 });

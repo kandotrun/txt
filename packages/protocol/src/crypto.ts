@@ -93,11 +93,6 @@ export function vaultKeyAad(
   );
 }
 
-export interface WrappedKey {
-  wrapSalt32: string; // base64url
-  nonce: string; // base64url 12
-  wrappedKey: string; // base64url ciphertext||tag
-}
 
 export async function wrapVaultKey(
   vaultKey: Uint8Array,
@@ -243,36 +238,6 @@ export function draftAad(
   draftVersion: number,
 ): Uint8Array {
   return encode("txt/v1/draft", uuidToBytes(accountId), uuidToBytes(documentId), sceneId, draftVersion);
-}
-
-/**
- * Local-only record container (spec §6.4).
- *
- * Used for small at-rest values that must not be readable without the VaultKey
- * (for example the WebAuthn user handle needed to add another passkey). These
- * records never travel to the server; the purpose name exists so local storage
- * is cryptographically separated from the wire containers.
- */
-export function deriveLocalRecordKey(
-  vaultKey: Uint8Array,
-  recordId: string,
-  accountId: string,
-  keyVersion: number,
-): Promise<Uint8Array> {
-  return hkdf(
-    vaultKey,
-    uuidToBytes(recordId),
-    encode("txt/v1/local-record-key", uuidToBytes(accountId), keyVersion),
-    KEY_BYTES,
-  );
-}
-
-export function localRecordAad(
-  accountId: string,
-  recordId: string,
-  recordVersion: number,
-): Uint8Array {
-  return encode("txt/v1/local-record", uuidToBytes(accountId), recordId, recordVersion);
 }
 
 /* ------------------------------------------------------------------ */

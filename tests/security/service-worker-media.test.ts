@@ -40,6 +40,10 @@ function deferred<T>() {
 const turn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 let listeners: Map<string, (event: unknown) => void>;
+/** Messages the worker posted to its clients (outside a MessageChannel). */
+let clientMessages: { id: string; data: unknown }[];
+/** Work the worker asked the browser to keep it alive for. */
+let extended: Promise<unknown>[];
 let fetchCipher: ReturnType<typeof vi.fn<typeof fetch>>;
 let info: MediaInfo;
 let allocations: number[];
@@ -65,6 +69,7 @@ function request(range?: string, options: { method?: string; clientId?: string; 
       signal: options.signal,
     }),
     respondWith: (value: Promise<Response>) => { response = Promise.resolve(value); },
+    waitUntil: (work: Promise<unknown>) => { extended.push(work); },
   });
   if (!response) throw new Error("the real SW fetch handler did not respond");
   return response;
@@ -139,10 +144,13 @@ beforeEach(async () => {
     },
   }));
   listeners = new Map();
+  clientMessages = [];
+  extended = [];
   vi.stubGlobal("self", {
     location: { origin: ORIGIN },
     addEventListener: (type: string, callback: (event: unknown) => void) => listeners.set(type, callback),
-    skipWaiting: vi.fn(), clients: { claim: vi.fn() },
+    skipWaiting: vi.fn(),
+    clients: { claim: vi.fn(), get: async (id: string) => ({ postMessage: (data: unknown) => { clientMessages.push({ id, data }); } }) },
   });
   fetchCipher = vi.fn<typeof fetch>(async (_url, init) => validCipher(cipherIndex(init)));
   vi.stubGlobal("fetch", fetchCipher);
@@ -535,7 +543,12 @@ describe("spec: bounded authenticated Service Worker media streams", () => {
   it.each(["stranger", "", null])("never acknowledges a media update without an owning session from %s", async (clientId) => {
     const postMessage = vi.fn();
     message({ type: "txt-media-update", sessionGeneration: 1, media: {} }, clientId, postMessage);
-    expect(postMessage).not.toHaveBeenCalled();
+    // Never an acknowledgement. An identified client without a session is
+    // told to handshake (it may be a page whose worker was restarted); a
+    // sender that cannot be identified gets no answer at all.
+    expect(postMessage.mock.calls.map(([data]) => data)).toEqual(
+      clientId ? [{ type: "txt-need-handshake" }] : [],
+    );
     expect((await request(undefined, { method: "HEAD" })).status).toBe(200);
     expect(fetchCipher).not.toHaveBeenCalled();
   });
@@ -613,5 +626,28 @@ describe("hardening: decrypted responses", () => {
     const handshakeCall = /serviceWorkerBridge\.start\(\{[\s\S]*?\}\)/.exec(source)?.[0] ?? "";
     expect(handshakeCall).toContain("txt-handshake");
     expect(handshakeCall).not.toMatch(/vaultKey|keyVersion/);
+  });
+});
+
+describe("hardening: a restarted worker", () => {
+  it("spec: asks the page for its handshake again when it has no session for a media request", async () => {
+    // What a browser restart leaves behind: the page is the same, the worker's
+    // memory is empty.
+    message({ type: "txt-lock" });
+    const response = await request("bytes=0-");
+    expect(response.status).toBe(423);
+    await Promise.all(extended);
+    expect(clientMessages).toEqual([{ id: CLIENT, data: { type: "txt-need-handshake" } }]);
+
+    // After the page answers, the same request is served.
+    handshake();
+    expect((await request("bytes=0-")).status).toBe(206);
+  });
+
+  it("spec: refuses a media update for a session it does not have, on the same channel", async () => {
+    message({ type: "txt-lock" });
+    const replies: unknown[] = [];
+    message({ type: "txt-media-update", sessionGeneration: 1, media: {} }, CLIENT, (data) => replies.push(data));
+    expect(replies).toEqual([{ type: "txt-need-handshake" }]);
   });
 });

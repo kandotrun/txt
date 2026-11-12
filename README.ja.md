@@ -87,7 +87,8 @@ npm run build          # Webをビルド
 npm run test:e2e       # 実ブラウザー E2E（dev サーバーが動いていること）
 
 # 本番
-npm run deploy
+npm run deploy                                   # ビルド + Worker のデプロイ
+npx wrangler d1 migrations apply txt --remote    # 未適用の D1 マイグレーションを適用（deploy には含まれない）
 bash scripts/smoke-prod.sh
 ```
 
@@ -126,7 +127,7 @@ bash scripts/smoke-prod.sh
 
 - サーバーは平文本文・ファイル名・MIME・PRF 出力・VaultKey・fileKey を受け取りません。
 - `toJSON()` は送信に使いません（PRF results の漏洩防止）。署名検証に必要なフィールドだけの DTO を組み立てます。
-- 平文や鍵を `localStorage` / `sessionStorage` に置きません（IndexedDB には暗号化済みドラフトのみ。UI言語の選択は、内容ではない設定として唯一 `localStorage` に置きます）。
+- 平文や鍵を `localStorage` / `sessionStorage` に置きません（IndexedDB には暗号化済みドラフトのみ。`localStorage` に置くのは内容ではない2つの値だけです: UI言語の選択と、巻き戻し検知に使う文書ごとのリビジョン番号）。
 - API・暗号文・復号後の応答は `private, no-store`。ハッシュ付き静的資産のみ長期キャッシュします。
 
 ## 📄 ライセンス

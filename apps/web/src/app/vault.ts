@@ -8,9 +8,12 @@
  */
 
 import {
+  aesGcmEncrypt,
+  deriveDocumentKey,
   deriveKek,
   deriveRecoveryAuth,
   deriveRecoveryKek,
+  documentAad,
   formatRecoveryKey,
   parseRecoveryKey,
   randomBytes,
@@ -19,8 +22,9 @@ import {
   vaultKeyAad,
   wrapVaultKey,
 } from "../../../../packages/protocol/src/crypto.ts";
-import { toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
-import { api } from "./api.ts";
+import { fromBase64Url, toBase64Url } from "../../../../packages/protocol/src/base64url.ts";
+import { createEmptyDocument, serializeDocument } from "../../../../packages/protocol/src/document.ts";
+import { api, ApiRequestError } from "./api.ts";
 import { t } from "./i18n.ts";
 import type { KeyEnvelope } from "./api.ts";
 import { assertCredential, createCredential, WebAuthnError } from "./webauthn.ts";
@@ -84,7 +88,6 @@ async function unwrapFromEnvelope(options: {
   accountId: string;
   credentialId: Uint8Array;
 }): Promise<Uint8Array> {
-  const { fromBase64Url } = await import("../../../../packages/protocol/src/base64url.ts");
   const kek = await deriveKek(
     options.prfOutput,
     fromBase64Url(options.envelope.wrapSalt32),
@@ -151,19 +154,14 @@ export async function registerAccount(): Promise<RegistrationResult> {
   const documentId = crypto.randomUUID();
   const bootstrapId = crypto.randomUUID();
   // The initial empty document: one empty text block, encrypted client-side.
-  const { createEmptyDocument, serializeDocument } = await import(
-    "../../../../packages/protocol/src/document.ts"
-  );
   const emptyDoc = createEmptyDocument();
-  const snapshotKey = await (await import("../../../../packages/protocol/src/crypto.ts")).deriveDocumentKey(
+  const snapshotKey = await deriveDocumentKey(
     vaultKey,
     bootstrapId,
     accountId,
     documentId,
     KEY_VERSION,
   );
-  const { aesGcmEncrypt } = await import("../../../../packages/protocol/src/crypto.ts");
-  const { documentAad } = await import("../../../../packages/protocol/src/crypto.ts");
   const docNonce = randomBytes(12);
   const docAad = documentAad(FORMAT_VERSION, KEY_VERSION, accountId, documentId, bootstrapId, 0);
   const docCiphertext = await aesGcmEncrypt(
@@ -251,28 +249,26 @@ export async function recoverWithKey(
   confirmNewKey: (newRecoveryKeyText: string) => Promise<boolean>,
 ): Promise<RecoveryOutcome> {
   const parsed = await parseRecoveryKey(recoveryKeyText);
-  const recoveryAuth = await deriveRecoveryAuth(parsed.seed, parsed.accountId);
-  await api.recoveryStart(parsed.accountId, toBase64Url(recoveryAuth));
+  const recoveryAuth = toBase64Url(await deriveRecoveryAuth(parsed.seed, parsed.accountId));
+  await api.recoveryStart(parsed.accountId, recoveryAuth);
 
   const keys = await api.keys();
   const recovery = keys.recovery;
   if (!recovery) throw new Error(t("復旧情報が見つかりません。"));
   const recoveryKek = await deriveRecoveryKek(parsed.seed, parsed.accountId);
   const aad = recoveryAad(parsed.accountId, recovery.recoveryVersion, recovery.keyVersion);
-  const { fromBase64Url } = await import("../../../../packages/protocol/src/base64url.ts");
   const vaultKey = await unwrapVaultKey(
     recoveryKek,
     fromBase64Url(recovery.nonce),
     fromBase64Url(recovery.wrappedKey),
     aad,
   );
-  wipe(parsed.seed, recoveryAuth, recoveryKek);
+  wipe(parsed.seed, recoveryKek);
 
   // Register a new passkey for this account and prepare the new recovery
   // record. Nothing is stored on the server yet.
   const userHandle = await currentUserHandle();
-  const addOptions = await api.recoveryOptions();
-  const created = await createCredential(addOptions.options);
+  let created = await createCredential((await api.recoveryOptions()).options);
 
   const newSeed = randomBytes(32);
   const newAuth = await deriveRecoveryAuth(newSeed, parsed.accountId);
@@ -281,35 +277,52 @@ export async function recoverWithKey(
   const newAad = recoveryAad(parsed.accountId, newVersion, KEY_VERSION);
   const { nonce, wrappedKey } = await wrapVaultKey(vaultKey, newKek, newAad);
   const newAuthHash = await crypto.subtle.digest("SHA-256", newAuth as BufferSource);
-  const envelope = await buildEnvelope({
-    vaultKey,
-    prfOutput: created.prfOutput,
-    accountId: parsed.accountId,
-    credentialId: created.credentialId,
-  });
   const newRecoveryKeyText = await formatRecoveryKey(parsed.accountId, newSeed);
   wipe(newSeed, newAuth, newKek);
+  const newRecovery = {
+    recoveryVersion: newVersion,
+    keyVersion: KEY_VERSION,
+    authHash32: toBase64Url(new Uint8Array(newAuthHash)),
+    nonce: toBase64Url(nonce),
+    wrappedKey: toBase64Url(wrappedKey),
+  };
 
   if (!(await confirmNewKey(newRecoveryKeyText))) {
-    wipe(vaultKey);
+    wipe(vaultKey, created.prfOutput);
     throw new Error(
       t("新しい復旧キーの保存を確認できなかったため、復旧を完了していません。今までの復旧キーは引き続き使えます。"),
     );
   }
 
-  await api.recoveryComplete({
-    operationId: crypto.randomUUID(),
-    response: created.dto,
-    userHandle,
-    envelope,
-    recovery: {
-      recoveryVersion: newVersion,
-      keyVersion: KEY_VERSION,
-      authHash32: toBase64Url(new Uint8Array(newAuthHash)),
-      nonce: toBase64Url(nonce),
-      wrappedKey: toBase64Url(wrappedKey),
-    },
-  });
+  // Saving the key is a human step with no time limit, but the passkey
+  // ceremony (5 minutes) and the recovery session (15 minutes) both expire.
+  // If either lapsed meanwhile, run them again and commit the SAME recovery
+  // record, so the key the user has just saved is the one that takes effect.
+  // The envelope is rebuilt each time: it is bound to the passkey it wraps for.
+  for (let attempt = 0; ; attempt += 1) {
+    const envelope = await buildEnvelope({
+      vaultKey,
+      prfOutput: created.prfOutput,
+      accountId: parsed.accountId,
+      credentialId: created.credentialId,
+    });
+    try {
+      await api.recoveryComplete({
+        operationId: crypto.randomUUID(),
+        response: created.dto,
+        userHandle,
+        envelope,
+        recovery: newRecovery,
+      });
+      break;
+    } catch (error) {
+      const sessionLapsed = error instanceof ApiRequestError && error.status === 401;
+      const ceremonyLapsed = error instanceof ApiRequestError && error.code === "CHALLENGE_EXPIRED";
+      if (attempt > 0 || !(sessionLapsed || ceremonyLapsed)) throw error;
+      if (sessionLapsed) await api.recoveryStart(parsed.accountId, recoveryAuth);
+      created = await createCredential((await api.recoveryOptions()).options);
+    }
+  }
 
   return { vaultKey, accountId: parsed.accountId };
 }
@@ -329,29 +342,36 @@ export async function addPasskey(options: {
   accountId: string;
   keyVersion: number;
 }): Promise<{ credentialId: string }> {
-  // Step-up is required before adding an entry (§7).
-  const stepup = await api.stepupOptions();
-  const assertion = await assertCredential(stepup.options);
-  await api.stepupVerify(assertion.dto);
+  // A private copy, taken before anything is awaited: locking the page wipes
+  // the session's VaultKey, and this flow must never wrap a wiped key.
+  const vaultKey = options.vaultKey.slice();
+  try {
+    // Step-up is required before adding an entry (§7).
+    const stepup = await api.stepupOptions();
+    const assertion = await assertCredential(stepup.options);
+    await api.stepupVerify(assertion.dto);
 
-  const userHandle = await currentUserHandle();
-  const addOptions = await api.credentialAddOptions(userHandle);
-  const created = await createCredential(addOptions.options);
+    const userHandle = await currentUserHandle();
+    const addOptions = await api.credentialAddOptions(userHandle);
+    const created = await createCredential(addOptions.options);
 
-  const envelope = await buildEnvelope({
-    vaultKey: options.vaultKey,
-    prfOutput: created.prfOutput,
-    accountId: options.accountId,
-    credentialId: created.credentialId,
-  });
+    const envelope = await buildEnvelope({
+      vaultKey,
+      prfOutput: created.prfOutput,
+      accountId: options.accountId,
+      credentialId: created.credentialId,
+    });
 
-  await api.credentialAddVerify(created.dto);
-  await api.credentialActivate({
-    credentialId: created.dto["id"] as string,
-    operationId: crypto.randomUUID(),
-    envelope,
-  });
-  return { credentialId: created.dto["id"] as string };
+    await api.credentialAddVerify(created.dto);
+    await api.credentialActivate({
+      credentialId: created.dto["id"] as string,
+      operationId: crypto.randomUUID(),
+      envelope,
+    });
+    return { credentialId: created.dto["id"] as string };
+  } finally {
+    wipe(vaultKey);
+  }
 }
 
 /** Rotates the recovery key while unlocked (spec §7.1). */
@@ -359,21 +379,31 @@ export async function rotateRecoveryKey(options: {
   vaultKey: Uint8Array;
   accountId: string;
 }): Promise<string> {
-  const stepup = await api.stepupOptions();
-  const assertion = await assertCredential(stepup.options);
-  await api.stepupVerify(assertion.dto);
+  // See addPasskey: a copy that a lock during this flow cannot wipe.
+  const vaultKey = options.vaultKey.slice();
+  let wrapped: { nonce: Uint8Array; wrappedKey: Uint8Array };
+  let authHash: ArrayBuffer;
+  let recoveryKeyText: string;
+  let version: number;
+  try {
+    const stepup = await api.stepupOptions();
+    const assertion = await assertCredential(stepup.options);
+    await api.stepupVerify(assertion.dto);
 
-  const current = await api.keys();
-  const previous = current.recovery?.recoveryVersion ?? 0;
-  const seed = randomBytes(32);
-  const auth = await deriveRecoveryAuth(seed, options.accountId);
-  const kek = await deriveRecoveryKek(seed, options.accountId);
-  const version = previous + 1;
-  const aad = recoveryAad(options.accountId, version, KEY_VERSION);
-  const { nonce, wrappedKey } = await wrapVaultKey(options.vaultKey, kek, aad);
-  const authHash = await crypto.subtle.digest("SHA-256", auth as BufferSource);
-  const recoveryKeyText = await formatRecoveryKey(options.accountId, seed);
-  wipe(seed, auth, kek);
+    const current = await api.keys();
+    version = (current.recovery?.recoveryVersion ?? 0) + 1;
+    const seed = randomBytes(32);
+    const auth = await deriveRecoveryAuth(seed, options.accountId);
+    const kek = await deriveRecoveryKek(seed, options.accountId);
+    const aad = recoveryAad(options.accountId, version, KEY_VERSION);
+    wrapped = await wrapVaultKey(vaultKey, kek, aad);
+    authHash = await crypto.subtle.digest("SHA-256", auth as BufferSource);
+    recoveryKeyText = await formatRecoveryKey(options.accountId, seed);
+    wipe(seed, auth, kek);
+  } finally {
+    wipe(vaultKey);
+  }
+  const { nonce, wrappedKey } = wrapped;
 
   await api.rotateRecovery({
     recoveryVersion: version,

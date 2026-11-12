@@ -11,6 +11,7 @@ import { SELF, createExecutionContext, env } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { encodeBase64Url } from "../../apps/worker/src/document/store.ts";
+import { clientNetwork } from "../../apps/worker/src/context.ts";
 import worker from "../../apps/worker/src/index.ts";
 import type { Env } from "../../apps/worker/src/types.ts";
 import { cancelUpload, completeUpload, loadUpload } from "../../apps/worker/src/media/store.ts";
@@ -1585,6 +1586,38 @@ describe("hardening: recovery", () => {
   });
 });
 
+describe("hardening: recovery ceremony lifetime", () => {
+  it("spec: an expired ceremony is reported as such and commits nothing, and a fresh one then completes", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const cookie = await startRecovery(account);
+    const before = await TEST_ENV.DB.prepare(`SELECT recovery_version FROM recovery WHERE account_id = ?1`)
+      .bind(account.accountId).first<{ recovery_version: number }>();
+
+    const first = await postJson("/api/v1/recovery/options", {}, webHeaders, cookie);
+    const { options } = (await first.json()) as { options: { challenge: string } };
+    const lapsedBody = await recoveryCompleteBody(account, await createCredential(), options.challenge);
+    // The user took longer than the ceremony allows to save the new key.
+    await TEST_ENV.DB.prepare(`UPDATE challenges SET expires_at = ?1 WHERE purpose = 'recovery-add' AND account_id = ?2`)
+      .bind(Date.now() - 1000, account.accountId).run();
+    const lapsed = await postJson("/api/v1/recovery/complete", lapsedBody, webHeaders, cookie);
+    expect.soft(lapsed.status).toBe(400);
+    expect.soft(((await lapsed.json()) as { error: { code: string } }).error.code).toBe("CHALLENGE_EXPIRED");
+    const after = await TEST_ENV.DB.prepare(`SELECT recovery_version FROM recovery WHERE account_id = ?1`)
+      .bind(account.accountId).first<{ recovery_version: number }>();
+    expect.soft(after?.recovery_version).toBe(before?.recovery_version);
+
+    // The same recovery record with a new ceremony and a new passkey.
+    const second = await postJson("/api/v1/recovery/options", {}, webHeaders, cookie);
+    const retry = (await second.json()) as { options: { challenge: string } };
+    const freshBody = await recoveryCompleteBody(account, await createCredential(), retry.options.challenge);
+    const completed = await postJson(
+      "/api/v1/recovery/complete", { ...freshBody, recovery: lapsedBody.recovery }, webHeaders, cookie,
+    );
+    expect(completed.status).toBe(201);
+  });
+});
+
 describe("hardening: bootstrap is a one-time activation", () => {
   it("spec: an active session cannot replace the recovery record or re-activate a revoked passkey", async () => {
     const account = await registerAccount();
@@ -1666,12 +1699,15 @@ describe("hardening: step-up", () => {
   it("spec: starting a step-up ceremony is a guarded cookie write", async () => {
     const account = await registerAccount();
     await bootstrapAccount(account);
+    // Our own origin but no request marker: only the route's own guard can
+    // refuse this (the API-wide origin gate lets it through).
     const response = await postJson(
       "/api/v1/auth/stepup/options", {},
-      { "content-type": "application/json", origin: "https://evil.example", "x-txt-request": "1" },
+      { "content-type": "application/json", origin: BASE },
       account.cookie,
     );
-    expect(response.status).toBe(403);
+    expect.soft(response.status).toBe(403);
+    expect(((await response.json()) as { error: { code: string } }).error.code).toBe("CSRF_REQUIRED");
   });
 
   it("spec: revoking a passkey requires an active, re-authenticated session", async () => {
@@ -1851,5 +1887,27 @@ describe("hardening: surface", () => {
       statuses.push(response.status);
     }
     expect(statuses.at(-1)).toBe(429);
+  });
+});
+
+describe("hardening: request classification", () => {
+  it.each([
+    ["203.0.113.7", "203.0.113.7"],
+    ["::ffff:203.0.113.7", "203.0.113.7"],
+    ["::ffff:cb00:7107", "203.0.113.7"],
+    ["0:0:0:0:0:ffff:203.0.113.7", "203.0.113.7"],
+    ["2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::/64"],
+    ["2001:db8::1", "2001:db8:0:0::/64"],
+    ["", "unknown"],
+  ])("spec: counts %s as network %s", (header, network) => {
+    const headers: Record<string, string> = header ? { "cf-connecting-ip": header } : {};
+    expect(clientNetwork(new Request(`${BASE}/api/v1/health`, { headers }))).toBe(network);
+  });
+
+  it("spec: an API route reached through an encoded path still carries the API headers", async () => {
+    const response = await SELF.fetch(`${BASE}/%61pi/v1/health`);
+    expect.soft(response.status).toBe(200);
+    expect.soft(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("content-security-policy")).toContain("default-src 'none'");
   });
 });

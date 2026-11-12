@@ -116,6 +116,10 @@ export class ServiceWorkerBridge {
       channel.port1.onmessage = (event: MessageEvent) => {
         if (event.data?.type === "txt-ready" && event.data.sessionGeneration === this.generation) {
           finish(this.isCurrent(lifetime));
+        } else if (event.data?.type === "txt-need-handshake") {
+          // The worker was restarted and has no session for this page: a
+          // refusal, answered at once instead of by the timeout.
+          finish(false);
         }
       };
       try { this.target!.postMessage(data, [channel.port2]); } catch { finish(false); }

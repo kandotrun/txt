@@ -52,12 +52,6 @@ export function classify(file: File): MediaKind {
   throw new MediaRejectedError(t("この形式のファイルは添付できません。"));
 }
 
-export interface UploadTarget {
-  mediaId: string;
-  fileKey: string;
-  noncePrefix: Uint8Array;
-}
-
 /** Encrypts one chunk and returns its ciphertext. */
 async function encryptChunk(options: {
   bridge: CryptoBridge;

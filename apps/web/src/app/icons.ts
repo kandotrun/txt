@@ -15,7 +15,6 @@ const PATHS = {
   trash: "M4 7h16M9 7V4h6v3M6.5 7l1 13h9l1-13M10 11v6M14 11v6",
   copy: "M9 9h11v11H9zM5 15H4V4h11v1",
   download: "M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14",
-  close: "M6 6l12 12M18 6 6 18",
   check: "M5 12.5l4.5 4.5L19 7.5",
 } as const;
 

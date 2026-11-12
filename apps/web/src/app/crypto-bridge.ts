@@ -20,6 +20,7 @@ export class CryptoBridge {
   private unlocked: Promise<void>;
   private resolveUnlocked: (() => void) | null = null;
   private rejectUnlocked: ((reason: Error) => void) | null = null;
+  private locked = false;
   /**
    * Media IDs dropped while repairing the last decrypted document (spec §8).
    * The load path re-saves the repaired model so every client sees a clean
@@ -71,6 +72,9 @@ export class CryptoBridge {
   }
 
   private request<T>(message: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> {
+    // A terminated worker never answers: fail at once so the caller's own
+    // cleanup (an upload cancelling itself, for one) can run.
+    if (this.locked) return Promise.reject(new Error("locked"));
     const requestId = crypto.randomUUID();
     return new Promise<T>((resolve, reject) => {
       this.pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
@@ -108,6 +112,8 @@ export class CryptoBridge {
    * unlock builds a new bridge.
    */
   lock(): void {
+    if (this.locked) return;
+    this.locked = true;
     this.worker.postMessage({ type: "lock" });
     this.worker.terminate();
     this.rejectUnlocked?.(new Error("locked"));

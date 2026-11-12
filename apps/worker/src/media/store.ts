@@ -59,12 +59,6 @@ export interface MediaRow {
   created_at: number;
 }
 
-export interface UsageRow {
-  account_id: string;
-  used_bytes: number;
-  reserved_bytes: number;
-  limit_bytes: number;
-}
 
 export function planUpload(cipherBytes: number, chunkBytes: number) {
   if (!Number.isSafeInteger(cipherBytes) || cipherBytes <= 0) {

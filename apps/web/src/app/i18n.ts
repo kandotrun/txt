@@ -156,9 +156,12 @@ const EN: Record<string, string> = {
   "パスキーを失効しました。": "Passkey revoked.",
   "セッションを終了しました。": "Session ended.",
 
+  "本文が上限（1MiB）を超えているため保存できません。内容は端末に保持しています。":
+    "The sheet is over the 1 MiB limit and can't be saved. Your text is kept on this device.",
+
   // Rollback detection / recovery order
-  "サーバーの内容が以前の版に戻されています。適用していません。再読み込みして確認してください。":
-    "The server returned an older version. It was not applied. Reload to review.",
+  "サーバーの内容が以前の版に戻されています。適用していません。この画面の内容は端末に退避しました。再読み込みして確認してください。":
+    "The server returned an older version. It was not applied. What you see here has been kept on this device. Reload to review.",
   "サーバーの内容が、この端末で以前に開いた版より古くなっています":
     "The server's copy is older than one this device has already opened",
   以前より古い内容です: "This is an older copy",

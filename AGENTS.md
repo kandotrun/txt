@@ -36,6 +36,10 @@ bash scripts/smoke-prod.sh   # 本番スモーク（txt.2-38.com）
 
 - 変更は「実際に動いた」証拠とともに報告する。dry-run や未実行を合格扱いしない。
 - 本番デプロイは `npm run deploy`（ビルドを含む）。`npx wrangler deploy` 単体はビルドしない。
+- D1 マイグレーションは deploy に含まれない。`migrations/` を増やしたリリースでは
+  `npx wrangler d1 migrations apply txt --remote` を別に実行する。新しい Worker が依存する
+  マイグレーションは deploy の前に、古い Worker だけが使う表を消すマイグレーション（0005 など）は
+  deploy の後に適用する。
 - デプロイ後は `scripts/smoke-prod.sh` を実行し、失敗ゼロを確認する。
 
 ## 既知の落とし穴

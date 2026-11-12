@@ -44,6 +44,15 @@ export function clientNetwork(request: Request): string {
   const ip = request.headers.get("cf-connecting-ip")?.trim() ?? "";
   if (ip === "") return "unknown";
   if (!ip.includes(":")) return ip;
+  // An IPv4 client written as an IPv4-mapped IPv6 address is that IPv4
+  // client, not a member of one shared "all zero" /64.
+  const mapped = /^(?:::|(?:0{1,4}:){5})ffff:(?:(\d{1,3}(?:\.\d{1,3}){3})|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/i.exec(ip);
+  if (mapped) {
+    if (mapped[1]) return mapped[1];
+    const high = parseInt(mapped[2] as string, 16);
+    const low = parseInt(mapped[3] as string, 16);
+    return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+  }
   const [head = "", tail = ""] = ip.toLowerCase().split("::");
   const groups = head === "" ? [] : head.split(":");
   if (ip.includes("::")) {

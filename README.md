@@ -87,7 +87,8 @@ npm run build          # build the Web app
 npm run test:e2e       # real-browser E2E (needs the dev server running)
 
 # Production
-npm run deploy
+npm run deploy                                   # build + deploy the Worker
+npx wrangler d1 migrations apply txt --remote    # apply pending D1 migrations (not part of deploy)
 bash scripts/smoke-prod.sh
 ```
 
@@ -119,7 +120,7 @@ Not yet done — stated plainly:
 
 - The server never receives plaintext, file names, MIME types, PRF output, VaultKey, or fileKeys.
 - `toJSON()` output is never sent as-is (it would leak PRF results); DTOs are assembled field by field for signature verification only.
-- No plaintext or keys in `localStorage` / `sessionStorage` (IndexedDB holds encrypted drafts only; the UI-language choice is the one non-content preference kept in `localStorage`).
+- No plaintext or keys in `localStorage` / `sessionStorage` (IndexedDB holds encrypted drafts only; `localStorage` keeps only two non-content values: the UI-language choice and, per document, the revision number used for rollback detection).
 - API, ciphertext, and decrypted responses are `private, no-store`; only hashed static assets are cached long-term.
 
 ## 📄 License

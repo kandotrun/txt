@@ -55,9 +55,10 @@ app.use("*", async (c, next) => {
 app.use("*", async (c, next) => {
   await next();
 
-  const url = new URL(c.req.url);
-  const isApi = url.pathname.startsWith(API_PREFIX);
-  const isServiceWorker = url.pathname === "/sw.js";
+  // `c.req.path` is the decoded path the router matched on, so an encoded
+  // spelling of an API route gets the API headers too.
+  const isApi = c.req.path.startsWith(API_PREFIX);
+  const isServiceWorker = c.req.path === "/sw.js";
 
   const headers = c.res.headers;
   for (const [name, value] of Object.entries(BASELINE_SECURITY_HEADERS)) {

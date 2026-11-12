@@ -60,6 +60,20 @@ interface Handshake {
 
 const sessions = new Map<string, SessionKeys>();
 
+/**
+ * Sessions live only in this worker's memory, and a browser stops an idle
+ * worker and starts it again whenever it likes — with that memory empty and
+ * without telling the page (the controller object does not change). Only the
+ * worker can notice, so it asks: a page that still has its vault open answers
+ * with a fresh handshake (spec §11.6). The message carries nothing.
+ */
+const NEED_HANDSHAKE = { type: "txt-need-handshake" } as const;
+
+async function requestHandshake(clientId: string): Promise<void> {
+  const client = await self.clients.get(clientId);
+  client?.postMessage(NEED_HANDSHAKE);
+}
+
 function clearSession(clientId: string): void {
   const previous = sessions.get(clientId);
   sessions.delete(clientId);
@@ -101,7 +115,14 @@ self.addEventListener("message", (event) => {
     return;
   }
   const session = sessions.get(clientId);
-  if (data?.type === "txt-media-update" && session?.ownerClientId === clientId) {
+  if (data?.type === "txt-media-update") {
+    if (!session) {
+      // Restarted since the handshake (see NEED_HANDSHAKE): say so on the
+      // same channel, so the page does not wait for an acknowledgement.
+      event.ports[0]?.postMessage(NEED_HANDSHAKE);
+      return;
+    }
+    if (session.ownerClientId !== clientId) return;
     if (data.sessionGeneration !== undefined && data.sessionGeneration !== session.generation) return;
     session.media = new Map(Object.entries((data.media ?? {}) as Record<string, MediaInfo>));
     event.ports[0]?.postMessage({ type: "txt-ready", sessionGeneration: session.generation });
@@ -125,6 +146,7 @@ async function handleMediaRequest(event: FetchEvent): Promise<Response> {
   }
   const owner = sessions.get(event.clientId);
   if (!owner) {
+    event.waitUntil(requestHandshake(event.clientId).catch(() => undefined));
     return noStore(new Response("locked", { status: 423 }));
   }
   if (event.clientId !== owner.ownerClientId) {

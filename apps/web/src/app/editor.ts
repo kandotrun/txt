@@ -18,7 +18,7 @@
 
 import { Schema } from "prosemirror-model";
 import type { Node as PMNode } from "prosemirror-model";
-import { EditorState, Plugin, TextSelection } from "prosemirror-state";
+import { EditorState, Plugin, Selection, TextSelection } from "prosemirror-state";
 import type { Transaction } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { keymap } from "prosemirror-keymap";
@@ -61,6 +61,9 @@ export const schema = new Schema({
       atom: true,
       selectable: true,
       attrs: { mediaId: {}, kind: {}, id: {} },
+      // A leaf node: no content hole. (With one, ProseMirror's serializer
+      // throws whenever a selection containing a media block is copied, cut
+      // or dragged.)
       toDOM: (node) => [
         "div",
         {
@@ -68,7 +71,6 @@ export const schema = new Schema({
           "data-media-id": node.attrs.mediaId as string,
           "data-media-kind": node.attrs.kind as string,
         },
-        0,
       ],
       // Deliberately no `parseDOM`: a media block is only ever created by this
       // app from an upload it performed. Pasted or dropped HTML that imitates
@@ -103,7 +105,7 @@ export interface EditorOptions {
   /** Provides current media metadata for rendering. */
   getMediaInfo: (mediaId: string) => MediaInfo | undefined;
   /** Builds the DOM for one media element; must never autoplay. */
-  renderMedia: (mediaId: string, info: MediaInfo, blockId: string) => HTMLElement;
+  renderMedia: (mediaId: string, info: MediaInfo) => HTMLElement;
 }
 
 /**
@@ -184,7 +186,19 @@ export class Editor {
               }
               return false;
             },
-            handleDrop: (view, event) => {
+            handleDrop: (view, event, slice) => {
+              // A media block is only placed by the app, with a text block on
+              // each side (spec §8). Dragging one elsewhere could leave it at
+              // the edge of the document, which no save accepts.
+              let carriesMedia = false;
+              slice.content.descendants((node) => {
+                if (node.type.name === MEDIA_NODE) carriesMedia = true;
+                return !carriesMedia;
+              });
+              if (carriesMedia) {
+                event.preventDefault();
+                return true;
+              }
               const drag = event as DragEvent;
               const files = Array.from(drag.dataTransfer?.files ?? []).filter(
                 (file) => file.size > 0,
@@ -356,25 +370,37 @@ export class Editor {
     const current = this.view.state.doc;
     const next = buildDocFromDocument(document);
     const range = changedBlockRange(current, next);
-    if (!range) return;
-    const transaction = this.view.state.tr
-      .replaceWith(range.from, range.to, range.replacement)
-      .setMeta("addToHistory", false);
-    this.withExternalApply(() => this.view.dispatch(transaction));
+    if (range) {
+      const head = this.view.state.selection.head;
+      const transaction = this.view.state.tr
+        .replaceWith(range.from, range.to, range.replacement)
+        .setMeta("addToHistory", false);
+      if (head >= range.from && head <= range.to) {
+        // The caret sat inside what was replaced. Mapping would push it past
+        // the new blocks — possibly onto a media block, where the next
+        // keystroke would replace the media. Keep it at the same offset,
+        // clamped into the replacement, and always in text.
+        const inserted = range.replacement.reduce((size, node) => size + node.nodeSize, 0);
+        const $target = transaction.doc.resolve(Math.min(head, range.from + inserted));
+        transaction.setSelection(
+          Selection.findFrom($target, -1, true) ??
+            Selection.findFrom($target, 1, true) ??
+            Selection.atStart(transaction.doc),
+        );
+      }
+      this.withExternalApply(() => this.view.dispatch(transaction));
+    }
+    // Every applied remote copy ends the undo history, changed or not: Undo
+    // must not reach back across another device's save (spec §9.7).
+    this.clearHistory();
   }
 
-  /** Clears history so a remote adoption cannot be undone (spec §9.7). */
+  /** Drops the undo history; the document and the selection stay as they are. */
   clearHistory(): void {
+    const { doc, selection, plugins } = this.view.state;
     this.withExternalApply(() => {
-      this.view.updateState(
-        EditorState.create({ schema, doc: this.view.state.doc, plugins: this.view.state.plugins }),
-      );
+      this.view.updateState(EditorState.create({ schema, doc, selection, plugins }));
     });
-  }
-
-  destroy(): void {
-    if (this.settlingTimer !== null) window.clearTimeout(this.settlingTimer);
-    this.view.destroy();
   }
 
   private createMediaNodeView(node: PMNode): {
@@ -386,7 +412,7 @@ export class Editor {
     const blockId = (node.attrs.id as string | undefined) ?? newId();
     const info = this.options.getMediaInfo(mediaId);
     const dom = info
-      ? this.options.renderMedia(mediaId, info, blockId)
+      ? this.options.renderMedia(mediaId, info)
       : buildPlaceholder(mediaId);
     // Keep the player identity: update() mutates attributes in place instead of
     // recreating the DOM (spec §3, §9.7).
