@@ -452,4 +452,146 @@ describe("SyncEngine", () => {
       process.off("unhandledRejection", onRejection);
     }
   });
+
+  it("spec: undoing a save whose answer was lost is itself saved, not replaced by that save", async () => {
+    // Base "PARAGRAPH". The user replaces it with "x"; the save is stored but
+    // its answer is lost. The user presses Undo before the retry.
+    const server = { revision: 5, text: "PARAGRAPH", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let loseNextAnswer = true;
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      if (loseNextAnswer) {
+        loseNextAnswer = false;
+        throw new TypeError("Failed to fetch");
+      }
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "PARAGRAPH" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.type("x");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(server.text).toBe("x"); // stored; the page does not know
+    h.type("PARAGRAPH"); // Undo: the screen equals the old base again
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.applied).toEqual([]);
+    expect(h.editor.text).toBe("PARAGRAPH");
+    expect(server.text).toBe("PARAGRAPH");
+    expect(conflicts).toEqual([]);
+    h.engine.stop();
+  });
+
+  it("spec: undoing a lost-answer save that another device built on asks instead of taking the other copy", async () => {
+    const server = { revision: 5, text: "PARAGRAPH", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    let puts = 0;
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts += 1;
+      if (puts === 1) {
+        // Stored, answer lost; then another device saves on top of it.
+        server.revision = body.encryptedRevision;
+        server.text = body.ciphertext.split(":").slice(1).join(":");
+        server.mutationId = body.mutationId;
+        server.revision += 1;
+        server.text = "x + phone";
+        server.mutationId = "foreign";
+        throw new TypeError("Failed to fetch");
+      }
+      if (puts === 2) await retryGate; // the retry is in flight while the user undoes
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: Array<{ local: string; remote: string }> = [];
+    const h = start({ revision: 5, text: "PARAGRAPH" });
+    (h.engine as unknown as { callbacks: { onConflict: (details: { local: DocumentModel; remote: DocumentModel }) => Promise<string> } })
+      .callbacks.onConflict = async ({ local, remote }) => {
+        conflicts.push({
+          local: (local.blocks[0] as { text: string }).text,
+          remote: (remote.blocks[0] as { text: string }).text,
+        });
+        return "keep-local";
+      };
+    h.type("x");
+    await vi.advanceTimersByTimeAsync(400); // first save: stored, answer lost
+    await vi.advanceTimersByTimeAsync(2000); // the retry starts and waits
+    h.type("PARAGRAPH"); // Undo while the retry is in flight
+    releaseRetry();
+    await vi.advanceTimersByTimeAsync(30_000);
+    // The other device's copy is never taken silently: the user is asked.
+    expect(h.applied).toEqual([]);
+    expect(conflicts).toEqual([{ local: "PARAGRAPH", remote: "x + phone" }]);
+    h.engine.stop();
+  });
+
+  it("spec: a refusal that concerns a base the page has already left is not shown as a conflict", async () => {
+    // The first save is stored but its answer is lost; a read then finds the
+    // server already holding what is on screen and moves the base. The late
+    // 412 for the retry must not turn the next edit into a conflict question.
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let puts = 0;
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts += 1;
+      const stale = ifMatch !== etag(server.revision);
+      if (!stale) {
+        server.revision = body.encryptedRevision;
+        server.text = body.ciphertext.split(":").slice(1).join(":");
+        server.mutationId = body.mutationId;
+      }
+      if (puts === 1) throw new TypeError("Failed to fetch");
+      if (puts === 2) await retryGate;
+      if (stale) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.type("first");
+    await vi.advanceTimersByTimeAsync(400); // stored, answer lost
+    await vi.advanceTimersByTimeAsync(2000); // retry in flight (will be 412)
+    for (const handler of h.listeners.get("focus") ?? []) handler(); // a read converges on "first"
+    await vi.advanceTimersByTimeAsync(50);
+    h.type("first, second");
+    releaseRetry(); // the 412 about the old base arrives now
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(conflicts).toEqual([]);
+    expect(server.text).toBe("first, second");
+    expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
+    h.engine.stop();
+  });
 });

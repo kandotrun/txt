@@ -17,21 +17,34 @@
  * Callers must only pass revisions of copies they have decrypted (or sealed)
  * themselves. What is stored is one counter per document id — no content and
  * no key — in localStorage, next to the language choice (spec §4.7, §6.5).
+ *
+ * Every tab of the browser shares that stored mark. Reading it is always
+ * safe; changing it is a read-compare-write, which two tabs could interleave
+ * (the slower one would write its smaller number last). Raising the mark
+ * therefore runs under a Web Lock named after the document, so the stored
+ * mark only ever grows — except through `reset`, the user's explicit choice.
  */
 
 type MarkStorage = Pick<Storage, "getItem" | "setItem">;
+
+/** The part of the Web Locks API this needs (`navigator.locks`). */
+export interface MarkLocks {
+  request(name: string, callback: () => void | Promise<void>): Promise<unknown>;
+}
 
 const KEY_PREFIX = "txt.seen.";
 
 export class RevisionGuard {
   private readonly key: string;
-  private readonly storage: MarkStorage | null;
+  private storage: MarkStorage | null;
+  private readonly locks: MarkLocks | null;
   /** Kept in memory too, so a storage failure still protects this page. */
   private seen: number | null;
 
-  constructor(documentId: string, storage: MarkStorage | null) {
+  constructor(documentId: string, storage: MarkStorage | null, locks: MarkLocks | null = null) {
     this.key = `${KEY_PREFIX}${documentId}`;
     this.storage = storage;
+    this.locks = locks;
     this.seen = null;
     this.current();
   }
@@ -64,29 +77,65 @@ export class RevisionGuard {
   record(encryptedRevision: number): void {
     const known = this.current();
     if (known !== null && encryptedRevision <= known) return;
+    this.seen = encryptedRevision;
+    this.exclusively(() => {
+      const stored = this.read();
+      if (stored === null || encryptedRevision > stored) this.write(encryptedRevision);
+    });
+  }
+
+  /**
+   * The user explicitly chose to open an older copy: restart from it. Written
+   * at once and unconditionally — it must hold for the very next check on
+   * this page, and it is the one change that is allowed to lower the mark.
+   */
+  reset(encryptedRevision: number): void {
+    this.seen = encryptedRevision;
     this.write(encryptedRevision);
   }
 
-  /** The user explicitly chose to open an older copy: restart from it. */
-  reset(encryptedRevision: number): void {
-    this.write(encryptedRevision);
+  /**
+   * Runs a change of the stored mark with no other tab in the middle of one.
+   * Without the Web Locks API the change simply runs; so does a change whose
+   * lock request fails.
+   */
+  private exclusively(change: () => void): void {
+    if (!this.locks) {
+      change();
+      return;
+    }
+    let done = false;
+    const once = (): void => {
+      if (done) return;
+      done = true;
+      change();
+    };
+    try {
+      void this.locks.request(this.key, once).catch(once);
+    } catch {
+      once();
+    }
   }
 
   private read(): number | null {
     try {
       const stored = this.storage?.getItem(this.key) ?? "";
-      return /^\d{1,15}$/.test(stored) ? Number(stored) : null;
+      if (!/^\d{1,16}$/.test(stored)) return null;
+      const value = Number(stored);
+      return Number.isSafeInteger(value) ? value : null;
     } catch {
       return null;
     }
   }
 
   private write(encryptedRevision: number): void {
-    this.seen = encryptedRevision;
     try {
       this.storage?.setItem(this.key, String(encryptedRevision));
     } catch {
-      // Private mode or quota: the in-memory mark still guards this page.
+      // Private mode or quota. From here on the in-memory mark is the only
+      // one this page has: stop consulting a store that cannot be updated, or
+      // its stale value would override an explicit reset.
+      this.storage = null;
     }
   }
 }

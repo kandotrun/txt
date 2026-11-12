@@ -95,6 +95,11 @@ export class SyncEngine {
   private readonly vaultKey: Uint8Array;
 
   private baseEtag: string | null = null;
+  /**
+   * The encryptedRevision of the copy at the base: the number this page
+   * decrypted or sealed itself. The server's own `revision` counter is not
+   * authenticated and is never used to build the next save.
+   */
   private baseRevision = -1;
   private editGeneration = 0;
   private committedGeneration = 0;
@@ -117,6 +122,12 @@ export class SyncEngine {
    * earlier save — its answer was lost — and not somebody else's edit.
    */
   private readonly unconfirmed = new Set<string>();
+  /**
+   * How many PUTs those ids stand for. A re-send repeats an id, so the set
+   * alone cannot tell "one save, refused" from "sent twice: the first attempt
+   * may be stored, the second was refused".
+   */
+  private unconfirmedSends = 0;
   private debounceTimer: number | null = null;
   private maxWaitTimer: number | null = null;
   private pollTimer: number | null = null;
@@ -176,6 +187,9 @@ export class SyncEngine {
   }
 
   start(): void {
+    // Polling may start long after construction (the unsynced-draft question
+    // comes first): measure idleness from now, not from then.
+    this.lastInteraction = Date.now();
     this.schedulePoll();
     document.addEventListener("visibilitychange", this.onVisibility);
     window.addEventListener("focus", this.onFocus);
@@ -312,7 +326,7 @@ export class SyncEngine {
     // This exact content was refused for a reason a retry cannot cure (too
     // large, invalid): wait for the next edit instead of sending it again.
     if (this.refusedGeneration === this.committedGeneration) return;
-    if (!this.forceSave && normalizedEqual(this.callbacks.getDocument(), this.baseDocument)) {
+    if (!this.forceSave && this.unconfirmed.size === 0 && normalizedEqual(this.callbacks.getDocument(), this.baseDocument)) {
       // "Changed" without a change (a cancelled composition, a save request
       // on an untouched sheet): there is nothing to send, and treating the
       // page as dirty would keep a newer remote version from being applied.
@@ -366,6 +380,8 @@ export class SyncEngine {
 
     this.callbacks.onState("saving");
     this.unconfirmed.add(mutationId);
+    this.unconfirmedSends += 1;
+    const sentAgainst = this.baseEtag;
     try {
       const result = await api.putDocument(
         {
@@ -377,17 +393,20 @@ export class SyncEngine {
           ciphertext: payload.ciphertext,
           referencedMediaIds: payload.referencedMediaIds,
         },
-        this.baseEtag,
+        sentAgainst,
       );
       this.baseEtag = result.etag;
-      this.baseRevision = result.revision;
+      this.baseRevision = encryptedRevision;
       this.baseDocument = document;
       this.forceSave = false;
-      this.unconfirmed.clear();
+      this.forgetUnconfirmed();
       // This device sealed that revision itself: it is the newest it knows.
       this.revisions.record(encryptedRevision);
       this.backoffMs = 1000;
-      const stillUnsynced = this.committedGeneration !== generation;
+      // "Still unsynced" needs a change that is really pending: a read may
+      // have found the server and the screen equal while this save was in
+      // flight, in which case a later generation number alone means nothing.
+      const stillUnsynced = this.dirty && this.committedGeneration !== generation;
       this.callbacks.onState(stillUnsynced ? "saving" : "saved");
       if (stillUnsynced) {
         this.scheduleSave();
@@ -405,6 +424,17 @@ export class SyncEngine {
         }, 2000);
       }
     } catch (error) {
+      if (this.baseEtag !== sentAgainst || !this.dirty) {
+        // While this save was in flight a read moved the base (and perhaps
+        // found the server already holding what is on screen). Whatever the
+        // server said about the old base no longer matters: there is nothing
+        // to ask the user and nothing to report as failed. Save again from
+        // the base the page holds now, if anything is still unsaved.
+        this.inFlight = null;
+        if (this.dirty) this.scheduleSave();
+        else this.callbacks.onState("idle");
+        return;
+      }
       await this.handleSaveError(error as Error, generation);
     }
   }
@@ -446,6 +476,12 @@ export class SyncEngine {
       documentJson: json,
       media: options.document.media,
     };
+  }
+
+  /** Every outstanding save is accounted for (confirmed, or left behind by a newer base). */
+  private forgetUnconfirmed(): void {
+    this.unconfirmed.clear();
+    this.unconfirmedSends = 0;
   }
 
   /**
@@ -537,13 +573,8 @@ export class SyncEngine {
       return;
     }
     if (remote.notModified || !remote.data) {
-      // Nothing changed server-side beyond our stale base: refresh the base and
-      // retry with a fresh revision.
-      const meta = await api.document();
-      if (meta.data) {
-        this.baseEtag = meta.etag ?? this.baseEtag;
-        this.baseRevision = meta.data.revision;
-      }
+      // An unconditional read always carries the copy; without one there is
+      // nothing to compare with, so nothing is adopted as a base unseen.
       this.scheduleRetry();
       return;
     }
@@ -577,16 +608,20 @@ export class SyncEngine {
     // The mutationId is part of the key derivation and of the AAD, so a copy
     // that decrypted under it really is that mutation.
     const ownSave = this.unconfirmed.has(remote.data.mutationId);
-    this.unconfirmed.clear();
+    // More than the save that was just refused is unaccounted for: an earlier
+    // one may be stored underneath the copy the server shows now.
+    const earlierSaveOutstanding = this.unconfirmedSends > 1;
+    this.forgetUnconfirmed();
 
     const local = this.callbacks.getDocument();
     // Equality is decided on the normalized common model, never on ciphertext
     // bytes (randomized nonces would differ even for identical content).
     if (normalizedEqual(local, remoteDocument)) {
       this.baseEtag = remote.etag ?? this.baseEtag;
-      this.baseRevision = remote.data.revision;
+      this.baseRevision = remote.data.encryptedRevision;
       this.baseDocument = remoteDocument;
       this.dirty = false;
+      this.forceSave = false;
       void this.drafts.clear();
       this.callbacks.onState("saved");
       return;
@@ -596,17 +631,19 @@ export class SyncEngine {
       // lost; what is on screen simply continues from it. Save on top of it —
       // there is no other writer to ask the user about.
       this.baseEtag = remote.etag ?? this.baseEtag;
-      this.baseRevision = remote.data.revision;
+      this.baseRevision = remote.data.encryptedRevision;
       this.baseDocument = remoteDocument;
       this.scheduleSave();
       return;
     }
-    if (normalizedEqual(local, this.baseDocument)) {
+    if (!earlierSaveOutstanding && normalizedEqual(local, this.baseDocument)) {
       // Marked dirty without a real change (a cancelled composition, a save
       // request): there is nothing of the user's to weigh against the newer
       // copy, so it is taken like any other remote version — at a safe point,
-      // by the ordinary poll.
+      // by the ordinary poll. (With an earlier save unaccounted for, going
+      // back to the base may be the user undoing that save: ask instead.)
       this.dirty = false;
+      this.forceSave = false;
       void this.drafts.clear();
       this.callbacks.onState("idle");
       void this.refreshRemote();
@@ -616,13 +653,27 @@ export class SyncEngine {
     this.callbacks.onState("conflict", t("競合があります。"));
     const decision = await this.callbacks.onConflict({ local, remote: remoteDocument });
     if (decision === "use-remote") {
+      const baseBeforeAnswer = this.baseEtag;
+      const revisionBeforeAnswer = this.baseRevision;
+      const documentBeforeAnswer = this.baseDocument;
       this.baseEtag = remote.etag ?? null;
-      this.baseRevision = remote.data.revision;
+      this.baseRevision = remote.data.encryptedRevision;
       this.baseDocument = remoteDocument;
       this.dirty = false;
+      this.forceSave = false;
       // The local copy was discarded on purpose: it must not be offered back.
       // Cleared before the apply, which may itself start a new (repair) save.
       void this.drafts.clear();
+      if (!this.callbacks.isSafePoint()) {
+        // A composition is under way: the editor must not be touched now.
+        // Leave the base where it was, so the next poll fetches this same
+        // copy and applies it once the input has settled.
+        this.baseEtag = baseBeforeAnswer;
+        this.baseRevision = revisionBeforeAnswer;
+        this.baseDocument = documentBeforeAnswer;
+        this.callbacks.onState("idle");
+        return;
+      }
       this.callbacks.applyRemote(remoteDocument);
       this.callbacks.onState("saved");
       return;
@@ -630,7 +681,7 @@ export class SyncEngine {
     if (decision === "keep-local") {
       // Keep editing; the next save uses the refreshed base ETag.
       this.baseEtag = remote.etag ?? this.baseEtag;
-      this.baseRevision = remote.data.revision;
+      this.baseRevision = remote.data.encryptedRevision;
       this.baseDocument = remoteDocument;
       this.inFlight = null;
       this.scheduleSave();
@@ -718,20 +769,32 @@ export class SyncEngine {
       // at best the copy the page already holds (its own save echoed back),
       // and applying it would only throw the undo history away.
       if (this.baseEtag !== baseWhenSent) return;
-      if (this.dirty && normalizedEqual(this.callbacks.getDocument(), this.baseDocument)) {
+      if (
+        this.dirty && !this.syncing && this.unconfirmed.size === 0 &&
+        normalizedEqual(this.callbacks.getDocument(), this.baseDocument)
+      ) {
         // Marked dirty without a real change (a cancelled composition): the
-        // remote version is applied as if nothing had been touched.
+        // remote version is applied as if nothing had been touched. Not while
+        // a save of this page is in flight or unconfirmed — if that save was
+        // stored, the server holds what was sent, and a screen that has gone
+        // back to the old base IS a change (see `unconfirmed`).
         this.dirty = false;
+        this.forceSave = false;
         void this.drafts.clear();
+        this.callbacks.onState("idle");
       }
       if (this.dirty) {
         // Unsaved local edits exist: never replace them silently.
         if (normalizedEqual(this.callbacks.getDocument(), remoteDocument)) {
           // The content already converged: adopt the newer base and stop.
           this.baseEtag = result.etag ?? this.baseEtag;
-          this.baseRevision = result.data.revision;
+          this.baseRevision = result.data.encryptedRevision;
           this.baseDocument = remoteDocument;
           this.dirty = false;
+          this.forceSave = false;
+          // Every save still unaccounted for was sent against a base the
+          // server has left; none can be underneath the copy just adopted.
+          this.forgetUnconfirmed();
           void this.drafts.clear();
           this.callbacks.onState("saved");
           return;
@@ -749,8 +812,9 @@ export class SyncEngine {
       // the same copy again and applies it once the input has settled.
       if (!this.callbacks.isSafePoint()) return;
       this.baseEtag = result.etag ?? this.baseEtag;
-      this.baseRevision = result.data.revision;
+      this.baseRevision = result.data.encryptedRevision;
       this.baseDocument = remoteDocument;
+      this.forgetUnconfirmed();
       this.callbacks.applyRemote(remoteDocument);
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 401) {

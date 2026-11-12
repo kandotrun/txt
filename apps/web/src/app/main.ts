@@ -793,16 +793,19 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     // Rollback detection (spec §10.4). The copy has just been decrypted, so
     // its encryptedRevision is authenticated: refuse one older than this
     // device has already opened, unless the user just chose to open it.
-    const revisions = new RevisionGuard(first.data.documentId, markStorage());
+    const revisions = new RevisionGuard(first.data.documentId, markStorage(), navigator.locks ?? null);
     if (acceptOlderCopy) revisions.reset(first.data.encryptedRevision);
     if (!revisions.accepts(first.data.encryptedRevision)) {
       // Another tab of this browser may have saved while that read was in
       // flight, raising the device's mark past it. Read once more before
       // concluding that the server went backwards.
+      // Judged against the mark as it is now, before the read is sent: the
+      // same race must not be able to raise the alarm on the second read.
+      const knownBeforeReread = revisions.current();
       const again = await readDocument();
       const reopened = again.data.documentId === first.data.documentId ? await open(again) : null;
       if (generation !== state.sessionGeneration) { bridge.lock(); return; }
-      if (!reopened || !revisions.accepts(again.data.encryptedRevision)) {
+      if (!reopened || !revisions.accepts(again.data.encryptedRevision, knownBeforeReread)) {
         throw new RollbackError(t("サーバーの内容が、この端末で以前に開いた版より古くなっています"));
       }
       first = again;
@@ -943,7 +946,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     // The engine must start from the loaded revision; otherwise the first save
     // races against an unknown base and 412s (spec §10.2).
     baseEtag: first.etag ?? null,
-    baseRevision: first.data.revision,
+    baseRevision: first.data.encryptedRevision,
     revisions: sessionRevisions,
   });
   state.sync = sync;

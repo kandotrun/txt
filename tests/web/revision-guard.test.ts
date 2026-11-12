@@ -90,4 +90,59 @@ describe("RevisionGuard", () => {
     expect.soft(pageB.accepts(8)).toBe(false);
     expect(new RevisionGuard(DOC, storage).accepts(8)).toBe(false);
   });
+
+  it("spec: two pages raising the mark at the same moment cannot leave the smaller number", async () => {
+    // Web Locks as the browser provides them: one holder at a time, in order.
+    let tail: Promise<unknown> = Promise.resolve();
+    const locks = {
+      request: (_name: string, callback: () => void | Promise<void>) => {
+        const run = tail.then(() => callback());
+        tail = run.catch(() => undefined);
+        return run;
+      },
+    };
+    // A store where another page's write lands between this page's read and
+    // its write unless the two are serialised.
+    const data = new Map<string, string>();
+    let beforeNextWrite: (() => void) | null = null;
+    const storage = {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        const interleave = beforeNextWrite;
+        beforeNextWrite = null;
+        interleave?.();
+        data.set(key, value);
+      },
+    };
+    const pageA = new RevisionGuard(DOC, storage, locks);
+    const pageB = new RevisionGuard(DOC, storage, locks);
+    pageA.record(5);
+    await tail;
+    // B decides to store 6 having read 5; before B's write lands, A stores 10.
+    beforeNextWrite = () => { pageA.record(10); };
+    pageB.record(6);
+    await tail;
+    await tail;
+    expect(data.get(`txt.seen.${DOC}`)).toBe("10");
+    expect(new RevisionGuard(DOC, storage, locks).accepts(8)).toBe(false);
+  });
+
+  it("spec: an explicit reset holds at once, even when the store cannot be written", () => {
+    const failing = {
+      getItem: () => "10",
+      setItem: () => { throw new Error("quota"); },
+    };
+    const guard = new RevisionGuard(DOC, failing);
+    expect(guard.accepts(3)).toBe(false);
+    guard.reset(3);
+    expect(guard.accepts(3)).toBe(true);
+  });
+
+  it("spec: a mark this page wrote can always be read back", () => {
+    const storage = memoryStorage();
+    new RevisionGuard(DOC, storage).record(Number.MAX_SAFE_INTEGER);
+    expect(new RevisionGuard(DOC, storage).current()).toBe(Number.MAX_SAFE_INTEGER);
+    // Anything that is not a safe integer is treated as no mark at all.
+    expect(new RevisionGuard(DOC, memoryStorage({ [`txt.seen.${DOC}`]: "99999999999999999" })).current()).toBeNull();
+  });
 });
