@@ -9,6 +9,7 @@
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { api, ApiRequestError } from "./api.ts";
+import type { CredentialSummary, SessionSummary } from "./api.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
 import { debugHookAllowed } from "./debug-hook.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
@@ -19,7 +20,7 @@ import {
   keepVaultKey,
 } from "./device-keep.ts";
 import { showCoachMarks } from "./coach.ts";
-import { Editor, isEmptyDoc } from "./editor.ts";
+import type { Editor } from "./editor.ts";
 import { icon } from "./icons.ts";
 import type { IconName } from "./icons.ts";
 import { BLOB_FALLBACK_MAX_BYTES, classify, fetchDecrypted, uploadFile } from "./media.ts";
@@ -28,6 +29,7 @@ import { cancelExit, playExit, replayEnter } from "./motion.ts";
 import { runIntro } from "./onboarding.ts";
 import { shareApp } from "./share.ts";
 import { SyncEngine, normalizedEqual } from "./sync.ts";
+import { RevisionGuard, RollbackError } from "./revision-guard.ts";
 import { ServiceWorkerBridge } from "./service-worker-bridge.ts";
 import { trustedScriptUrl } from "./trusted-types.ts";
 import type { SyncState } from "./sync.ts";
@@ -121,6 +123,20 @@ const state: AppState = {
   objectUrls: new Map(),
 };
 
+/**
+ * The editor engine is its own chunk. It is requested as soon as the gate is
+ * on screen, so it is ready by the time a passkey ceremony finishes, without
+ * being parsed before the first paint.
+ */
+let editorModule: Promise<typeof import("./editor.ts")> | null = null;
+function loadEditorModule(): Promise<typeof import("./editor.ts")> {
+  editorModule ??= import("./editor.ts").catch((error: unknown) => {
+    editorModule = null; // a failed fetch may be retried by the next unlock
+    throw error;
+  });
+  return editorModule;
+}
+
 let mediaReady: Promise<boolean> = Promise.resolve(false);
 const serviceWorkerBridge = "serviceWorker" in navigator
   ? new ServiceWorkerBridge(navigator.serviceWorker, { onInvalidated: () => {
@@ -210,7 +226,7 @@ let dismissCoach: (() => void) | null = null;
 function updateEmptyHint(): void {
   const editor = state.editor;
   elements.emptyHint.hidden =
-    !editor || !editor.isSafePoint() || !isEmptyDoc(editor.state.doc);
+    !editor || !editor.isSafePoint() || !editor.isEmpty;
 }
 
 /* ------------------------------------------------------------------ */
@@ -400,9 +416,8 @@ function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLEl
     const img = document.createElement("img");
     img.alt = info.name;
     img.decoding = "async";
-    img.loading = "lazy";
     container.append(img);
-    void materializeImage(img, mediaId, info);
+    materializeWhenVisible(container, () => void materializeImage(img, mediaId, info));
     return container;
   }
   if (info.kind === "image") {
@@ -431,6 +446,45 @@ function renderMedia(mediaId: string, info: MediaInfo, _blockId: string): HTMLEl
   return container;
 }
 
+/**
+ * Defers fetching and decrypting an image until it is about to scroll into
+ * view (spec §11.6): opening a sheet with many photos must not download and
+ * decrypt all of them. `loading="lazy"` cannot do this — the source only
+ * exists after the decryption it is supposed to postpone.
+ */
+const visibilityObserver =
+  typeof IntersectionObserver === "undefined"
+    ? null
+    : new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            visibilityObserver?.unobserve(entry.target);
+            const run = whenVisible.get(entry.target);
+            whenVisible.delete(entry.target);
+            run?.();
+          }
+        },
+        // About one screen of read-ahead in each direction.
+        { rootMargin: "100% 0px" },
+      );
+const whenVisible = new WeakMap<Element, () => void>();
+
+function materializeWhenVisible(container: HTMLElement, run: () => void): void {
+  if (!visibilityObserver) {
+    run();
+    return;
+  }
+  whenVisible.set(container, run);
+  visibilityObserver.observe(container);
+}
+
+/** Two metadata objects describe the same stored media (same key material). */
+function sameMedia(a: MediaInfo | undefined, b: MediaInfo): boolean {
+  return a !== undefined && a.fileKey === b.fileKey && a.noncePrefix === b.noncePrefix
+    && a.plainBytes === b.plainBytes && a.mime === b.mime;
+}
+
 function clearStreamSources(): void {
   for (const node of elements.editorHost.querySelectorAll<HTMLImageElement | HTMLMediaElement>("[data-sw-media]")) {
     node.removeAttribute("src");
@@ -451,7 +505,7 @@ async function materializeStream(node: HTMLImageElement | HTMLMediaElement, medi
   const generation = state.sessionGeneration;
   let barrier = mediaReady;
   while (await barrier) {
-    if (generation !== state.sessionGeneration || !state.unlocked || mediaInfo(mediaId) !== info) return;
+    if (generation !== state.sessionGeneration || !state.unlocked || !sameMedia(mediaInfo(mediaId), info)) return;
     if (barrier !== mediaReady) { barrier = mediaReady; continue; }
     if (!node.isConnected || !serviceWorkerBridge?.ready) return;
     const src = `/_local/media/${encodeURIComponent(mediaId)}`;
@@ -479,7 +533,7 @@ async function materializeImage(
   // times before giving up so a fresh insertion is not stuck on a placeholder.
   for (let attempt = 0; attempt < 4; attempt++) {
     const bridge: CryptoBridge | null = state.bridge;
-    if (!bridge || generation !== state.sessionGeneration || mediaInfo(mediaId) !== info) return;
+    if (!bridge || generation !== state.sessionGeneration || !sameMedia(mediaInfo(mediaId), info)) return;
     try {
       const blob = await fetchDecrypted({
         mediaId,
@@ -487,7 +541,7 @@ async function materializeImage(
         documentId: state.documentId,
         bridge,
       });
-      if (generation !== state.sessionGeneration || state.bridge !== bridge || mediaInfo(mediaId) !== info) return;
+      if (generation !== state.sessionGeneration || state.bridge !== bridge || !sameMedia(mediaInfo(mediaId), info)) return;
       const url = URL.createObjectURL(blob);
       state.objectUrls.set(mediaId, url);
       img.src = url;
@@ -646,12 +700,22 @@ function setSyncState(next: SyncState, detail?: string): void {
 /* Session start                                                       */
 /* ------------------------------------------------------------------ */
 
-async function startSession(vault: UnlockedVault): Promise<void> {
+/** localStorage, or null where it is unavailable (private mode, blocked). */
+function markStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Promise<void> {
   state.sessionGeneration += 1;
   const generation = state.sessionGeneration;
   serviceWorkerBridge?.reset();
   mediaReady = Promise.resolve(false);
   let startedBridge: CryptoBridge | null = null;
+  let sessionRevisions!: RevisionGuard;
 
   try {
     setSyncState("saving", t("読み込み中"));
@@ -668,6 +732,16 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     if (generation !== state.sessionGeneration) { bridge.lock(); return; }
     if (!first.data) throw new Error(t("文書を取得できません。"));
     state.documentId = first.data.documentId;
+    // Rollback detection (spec §10.4): refuse a copy older than one this
+    // device has already seen, unless the user just chose to open it.
+    const revisions = new RevisionGuard(first.data.documentId, markStorage());
+    if (acceptOlderCopy) revisions.reset(first.data);
+    if (!revisions.accepts(first.data)) {
+      throw new RollbackError(
+        t("サーバーの内容が、この端末で以前に開いた版より古くなっています"),
+        { syncEpoch: first.data.syncEpoch, revision: first.data.revision },
+      );
+    }
     if (window.__txtDebug) window.__txtDebug.step = "session:document-done";
 
     await bridge.unlock({
@@ -707,6 +781,8 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       ciphertext: first.data.ciphertext,
     });
     if (window.__txtDebug) window.__txtDebug.step = "session:decrypted";
+    revisions.record(first.data);
+    sessionRevisions = revisions;
 
   if (generation !== state.sessionGeneration) { bridge.lock(); return; }
   state.unlocked = vault;
@@ -717,6 +793,8 @@ async function startSession(vault: UnlockedVault): Promise<void> {
 
   let editor = state.editor;
   if (!editor) {
+    const { Editor } = await loadEditorModule();
+    if (generation !== state.sessionGeneration) return;
     editor = new Editor(
       elements.editorHost,
       {
@@ -765,7 +843,11 @@ async function startSession(vault: UnlockedVault): Promise<void> {
       },
       applyRemote: (remote, { fromAdoption }) => {
         if (generation !== state.sessionGeneration) return;
-        clearStreamSources();
+        // Media that is unchanged keeps its element — and a playing video
+        // keeps playing — so streams are only reset when something this page
+        // is showing was removed or replaced (spec §9.8).
+        const shown = Object.entries(state.document.media);
+        if (shown.some(([mediaId, info]) => !sameMedia(remote.media[mediaId], info))) clearStreamSources();
         state.document = remote;
         void syncServiceWorkerMedia();
         if (fromAdoption) {
@@ -827,6 +909,7 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     // races against an unknown base and 412s (spec §10.2).
     baseEtag: first.etag ?? null,
     baseRevision: first.data.revision,
+    revisions: sessionRevisions,
   });
   state.sync = sync;
   sync.start();
@@ -914,6 +997,20 @@ async function startSession(vault: UnlockedVault): Promise<void> {
     // A failed start must never present as an empty document.
     if (window.__txtDebug) window.__txtDebug.lastError = `${(error as Error).name}: ${(error as Error).message}`;
     setSyncState("decrypt-failed", t("内容を開けません。データは変更していません。"));
+    if (error instanceof RollbackError) {
+      // Not an error to retry blindly: the user decides whether the older
+      // copy is expected (a restore they know about) or not.
+      showGate({
+        title: t("以前より古い内容です"),
+        body: t("{message}。データは変更していません。", { message: error.message }),
+        actions: [
+          { label: t("もう一度試す"), onClick: () => void startSession(vault).catch(reportAuthError) },
+          { label: t("この古い版を開く"), primary: false, onClick: () => void startSession(vault, true).catch(reportAuthError) },
+        ],
+        error: true,
+      });
+      return;
+    }
     showGate({
       title: t("開けませんでした"),
       body: t("{message}。データは変更していません。", { message: (error as Error).message }),
@@ -1005,7 +1102,9 @@ function lockVault(reason: string): void {
   state.attaching.clear();
   renderAttachProgress();
   // Lock protects what was typed: store the draft now, not a window later.
-  void state.sync?.persistDraftNow();
+  // The VaultKey encrypts that draft, so it is wiped only after the write.
+  const lockedKey = state.unlocked.vaultKey;
+  void (state.sync?.persistDraftNow() ?? Promise.resolve()).finally(() => lockedKey.fill(0));
   state.sync?.stop();
   state.sync = null;
   state.bridge?.lock();
@@ -1219,10 +1318,9 @@ async function recoveryFlow(): Promise<void> {
   elements.gateFootnote.textContent = t("復旧しています……");
   elements.gateFootnote.dataset.state = "idle";
   try {
-    const outcome = await (await import("./vault.ts")).recoverWithKey(value);
+    const outcome = await (await import("./vault.ts")).recoverWithKey(value, confirmRecoveryKey);
     // The typed recovery key has been spent (it is rotated on completion).
     elements.recoveryInput.value = "";
-    await confirmRecoveryKey(outcome.newRecoveryKeyText);
     await startSession({
       vaultKey: outcome.vaultKey,
       accountId: outcome.accountId,
@@ -1248,6 +1346,98 @@ async function performStepUp(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
+/* Passkeys and sessions (spec §4.6 セキュリティ設定)                  */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Lists the account's passkeys and signed-in sessions, and lets the owner
+ * revoke a passkey (after a step-up) or end another session. The last active
+ * passkey cannot be revoked; the server enforces that too.
+ */
+async function manageSecurity(): Promise<void> {
+  let credentials: CredentialSummary[];
+  let sessions: SessionSummary[];
+  try {
+    const [credentialList, sessionList] = await Promise.all([api.credentials(), api.sessions()]);
+    credentials = credentialList.credentials.filter((entry) => entry.status === "active");
+    sessions = sessionList.sessions;
+  } catch (error) {
+    toast((error as Error).message);
+    return;
+  }
+  const day = (value: number): string => new Date(value).toLocaleDateString(localeTag());
+  const currentCredential = state.unlocked?.credentialId ?? "";
+  const passkeyName = (entry: CredentialSummary, index: number): string =>
+    t("パスキー{number}（{date} 登録）", { number: String(index + 1), date: day(entry.createdAt) });
+  const sessionName = (entry: SessionSummary): string =>
+    entry.isCurrent
+      ? t("このブラウザー（{date} 開始）", { date: day(entry.createdAt) })
+      : t("別のセッション（{date} 開始）", { date: day(entry.createdAt) });
+
+  const body = document.createElement("div");
+  body.append(textParagraph(t("パスキー"), "recovery-lead"));
+  credentials.forEach((entry, index) => {
+    const used = entry.credentialId === currentCredential ? t("（いま使用中）") : "";
+    body.append(textParagraph(`${passkeyName(entry, index)}${used}`));
+  });
+  body.append(textParagraph(t("セッション"), "recovery-lead"));
+  for (const entry of sessions) body.append(textParagraph(sessionName(entry)));
+
+  const others = sessions.filter((entry) => !entry.isCurrent);
+  const decision = await showDialog({
+    title: t("パスキーとセッション"),
+    body,
+    actions: [
+      // With a single passkey there is nothing that may be revoked.
+      ...(credentials.length > 1
+        ? credentials.map((entry, index) => ({
+            label: t("失効: {name}", { name: passkeyName(entry, index) }),
+            value: `revoke:${entry.credentialId}`,
+            tone: "danger" as const,
+          }))
+        : []),
+      ...others.map((entry) => ({
+        label: t("終了: {name}", { name: sessionName(entry) }),
+        value: `end:${entry.sid}`,
+        primary: false,
+      })),
+      { label: t("閉じる"), value: "close", primary: false },
+    ],
+  });
+  if (!state.unlocked) return;
+
+  if (decision.startsWith("revoke:")) {
+    const credentialId = decision.slice("revoke:".length);
+    const confirmed = await showDialog({
+      title: t("パスキーを失効しますか"),
+      body: t("このパスキーでは今後開けなくなります。ほかのパスキーと復旧キーは変わりません。"),
+      actions: [
+        { label: t("失効する"), value: "confirm", tone: "danger" },
+        { label: t("やめる"), value: "cancel", primary: false },
+      ],
+    });
+    if (confirmed !== "confirm") return;
+    try {
+      // Revocation is a sensitive operation (spec §5.4).
+      await performStepUp();
+      await api.revokeCredential(credentialId);
+      toast(t("パスキーを失効しました。"));
+    } catch (error) {
+      toast((error as Error).message);
+    }
+    return;
+  }
+  if (decision.startsWith("end:")) {
+    try {
+      await api.revokeSession(decision.slice("end:".length));
+      toast(t("セッションを終了しました。"));
+    } catch (error) {
+      toast((error as Error).message);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* "その他" menu (spec §4.6)                                           */
 /* ------------------------------------------------------------------ */
 
@@ -1266,6 +1456,7 @@ async function showMoreMenu(): Promise<void> {
       { label: t("今すぐロック"), value: "lock-now", icon: "lock" },
       { label: t("パスキーを追加"), value: "add-passkey", icon: "key" },
       { label: t("復旧キーを更新"), value: "rotate-recovery", icon: "refresh" },
+      { label: t("パスキーとセッション"), value: "security", icon: "device" },
       { label: t("使い方"), value: "help", icon: "help" },
       { label: t("言語"), value: "language" },
       // Shares the app's URL only — never the sheet (spec §4.6).
@@ -1355,6 +1546,9 @@ async function showMoreMenu(): Promise<void> {
       }
       break;
     }
+    case "security":
+      await manageSecurity();
+      break;
     case "end-session":
       await api.endSession().catch(() => undefined);
       if (state.unlocked) {
@@ -1554,3 +1748,6 @@ if (debugHookAllowed(window.location)) window.__txtDebug = { state };
 
 applyStaticLocale();
 void boot();
+// Warm the editor chunk while the gate is shown; a failure here is retried
+// (and reported) by the unlock that needs it.
+void loadEditorModule().catch(() => undefined);

@@ -17,16 +17,10 @@ const dist = path.join(root, "dist");
 await fs.rm(dist, { recursive: true, force: true });
 await fs.mkdir(dist, { recursive: true });
 
-const result = await esbuild.build({
-  entryPoints: {
-    app: path.join(root, "src/app/main.ts"),
-    "sw": path.join(root, "src/app/service-worker.ts"),
-    "crypto-worker": path.join(root, "src/app/crypto-worker.ts"),
-  },
+const common = {
   bundle: true,
   format: "esm",
   target: "es2022",
-  splitting: false,
   minify: true,
   sourcemap: false,
   outdir: path.join(dist, "assets"),
@@ -37,7 +31,29 @@ const result = await esbuild.build({
   define: {
     "process.env.NODE_ENV": '"production"',
   },
+};
+
+// The app is split: the gate (auth, onboarding, crypto) loads first and the
+// editor engine arrives as its own chunk, fetched while the gate is on screen.
+const app = await esbuild.build({
+  ...common,
+  entryPoints: { app: path.join(root, "src/app/main.ts") },
+  splitting: true,
+  chunkNames: "chunk.[hash]",
 });
+
+// Workers are self-contained files: the Service Worker is also served from
+// `/sw.js`, where a relative import of a shared chunk would not resolve.
+const workers = await esbuild.build({
+  ...common,
+  entryPoints: {
+    "sw": path.join(root, "src/app/service-worker.ts"),
+    "crypto-worker": path.join(root, "src/app/crypto-worker.ts"),
+  },
+  splitting: false,
+});
+
+const result = { metafile: { outputs: { ...app.metafile.outputs, ...workers.metafile.outputs } } };
 
 // The Service Worker must be reachable at a stable, unhashed path.
 const swEntry = Object.keys(result.metafile.outputs).find((file) => /[/\\]sw\.[A-Z0-9]+\.js$/.test(file));

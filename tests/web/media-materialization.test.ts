@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 
 // Execute the real main integration functions, without booting the app or networking.
 const source = ts.createSourceFile("main.ts", readFileSync(new URL("../../apps/web/src/app/main.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const names = ["attachFiles", "clampPosition", "mediaInfo", "materializeStream", "refreshStreamSources", "syncServiceWorkerMedia"];
+const names = ["attachFiles", "clampPosition", "mediaInfo", "sameMedia", "materializeStream", "refreshStreamSources", "syncServiceWorkerMedia"];
 const functions = names.map((name) => {
   const declaration = source.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === name);
   if (!declaration) throw new Error(`Missing main function: ${name}`);

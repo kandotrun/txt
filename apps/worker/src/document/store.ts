@@ -13,6 +13,7 @@
  *   invalid references therefore produce NO partial update.
  */
 
+import { MAX_MEDIA } from "../../../../packages/protocol/src/document.ts";
 import type { Env } from "../types.ts";
 import { conflict, preconditionFailed, unprocessable } from "../errors.ts";
 import { readJson, requireInt, requireString } from "../util.ts";
@@ -149,6 +150,11 @@ export async function parseDocumentUpdate(
   const referencedRaw = body.referencedMediaIds;
   if (!Array.isArray(referencedRaw)) {
     throw unprocessable("referencedMediaIds must be an array");
+  }
+  // The client's own limit is not trusted: a document holds at most MAX_MEDIA
+  // attachments (spec §11.1), and every id costs storage lookups below.
+  if (referencedRaw.length > MAX_MEDIA) {
+    throw unprocessable("referencedMediaIds has too many entries");
   }
   const referencedMediaIds: string[] = [];
   for (const value of referencedRaw) {

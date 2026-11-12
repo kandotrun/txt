@@ -138,11 +138,20 @@ export async function consumeChallenge(
     binding: ArrayBuffer;
   },
 ): Promise<ChallengeRow> {
-  let clientData: { challenge?: unknown };
+  let clientData: { challenge?: unknown; crossOrigin?: unknown };
   try {
     clientData = JSON.parse(decodeBase64Url(options.responseClientDataJSON));
   } catch {
     throw badRequest("clientDataJSON is not valid JSON");
+  }
+  if (typeof clientData !== "object" || clientData === null) {
+    throw badRequest("clientDataJSON is not valid JSON");
+  }
+  // The app refuses to be framed (frame-ancestors 'none') and delegates
+  // WebAuthn to no other origin, so a ceremony reported as running inside a
+  // cross-origin frame is never one of ours.
+  if (clientData.crossOrigin === true) {
+    throw badRequest("ceremony ran in a cross-origin frame");
   }
   const challenge = clientData.challenge;
   if (typeof challenge !== "string" || challenge.length === 0) {

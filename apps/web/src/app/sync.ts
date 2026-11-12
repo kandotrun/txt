@@ -24,6 +24,8 @@ import { ApiRequestError, api } from "./api.ts";
 import type { DocumentResponse } from "./api.ts";
 import type { CryptoBridge } from "./crypto-bridge.ts";
 import { DraftScheduler } from "./draft-scheduler.ts";
+import { markFromEtag } from "./revision-guard.ts";
+import type { RevisionGuard } from "./revision-guard.ts";
 import { saveDraft, clearDraft } from "./drafts.ts";
 import { t } from "./i18n.ts";
 
@@ -98,6 +100,7 @@ export class SyncEngine {
   private dirty = false;
   private channel: BroadcastChannel | null = null;
   private readonly drafts: DraftScheduler;
+  private readonly revisions: RevisionGuard;
 
   constructor(options: {
     bridge: CryptoBridge;
@@ -109,7 +112,10 @@ export class SyncEngine {
     /** Base revision/ETag of the document already loaded into the editor. */
     baseEtag?: string | null;
     baseRevision?: number;
+    /** Highest revision this device has seen (rollback detection, §10.4). */
+    revisions: RevisionGuard;
   }) {
+    this.revisions = options.revisions;
     this.bridge = options.bridge;
     this.callbacks = options.callbacks;
     this.accountId = options.accountId;
@@ -294,6 +300,7 @@ export class SyncEngine {
       );
       this.baseEtag = result.etag;
       this.baseRevision = result.revision;
+      this.revisions.record(markFromEtag(result.etag));
       this.backoffMs = 1000;
       const stillUnsynced = this.committedGeneration !== generation;
       this.callbacks.onState(stillUnsynced ? "saving" : "saved");
@@ -428,6 +435,7 @@ export class SyncEngine {
       this.scheduleRetry();
       return;
     }
+    if (this.refuseRollback(remote.data)) return;
     const remoteDocument = await this.bridge.decryptDocument({
       mutationId: remote.data.mutationId,
       encryptedRevision: remote.data.encryptedRevision,
@@ -436,6 +444,7 @@ export class SyncEngine {
       nonce: remote.data.nonce,
       ciphertext: remote.data.ciphertext,
     });
+    this.revisions.record(remote.data);
 
     const local = this.callbacks.getDocument();
     // Equality is decided on the normalized common model, never on ciphertext
@@ -534,6 +543,7 @@ export class SyncEngine {
     try {
       const result = await api.document(this.baseEtag ?? undefined);
       if (result.notModified || !result.data) return;
+      if (this.refuseRollback(result.data)) return;
       const remoteDocument = await this.bridge.decryptDocument({
         mutationId: result.data.mutationId,
         encryptedRevision: result.data.encryptedRevision,
@@ -542,6 +552,7 @@ export class SyncEngine {
         nonce: result.data.nonce,
         ciphertext: result.data.ciphertext,
       });
+      this.revisions.record(result.data);
       if (this.dirty) {
         // Unsaved local edits exist: never replace them silently.
         if (normalizedEqual(this.callbacks.getDocument(), remoteDocument)) {
@@ -569,6 +580,22 @@ export class SyncEngine {
       }
       // Network hiccups keep the polling cadence; no tight retry loop.
     }
+  }
+
+  /**
+   * A copy older than one this device has already seen is never applied and
+   * never used as a save base (spec §10.4): the page keeps what it shows, and
+   * syncing stops until the user reloads and decides.
+   */
+  private refuseRollback(remote: DocumentResponse): boolean {
+    if (this.revisions.accepts(remote)) return false;
+    this.stopped = true;
+    this.clearTimers();
+    this.callbacks.onState(
+      "decrypt-failed",
+      t("サーバーの内容が以前の版に戻されています。適用していません。再読み込みして確認してください。"),
+    );
+    return true;
   }
 
   /**

@@ -56,6 +56,9 @@ test("spec: 復旧キーだけで別の端末から開き、新しいパスキ�
 
   // The replacement key is shown before the sheet opens.
   await expect(other.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  // Nothing is committed until the new key is confirmed: the first device's
+  // session (and with it the old passkey and recovery key) is still valid.
+  expect(await page.evaluate(async () => (await fetch("/api/v1/session", { credentials: "same-origin" })).status)).toBe(200);
   const newKey = ((await other.locator("dialog pre").textContent()) ?? "").trim();
   expect(newKey).toMatch(/^TXT1\./);
   expect(newKey).not.toBe(recoveryKey);
@@ -277,4 +280,333 @@ test("spec: 連続入力中の端末退避はキー入力ごとではなくま�
   await expect(page.getByText("未同期の入力が残っています")).toBeVisible({ timeout: 30000 });
   await page.getByRole("button", { name: "採用する" }).click();
   await expect(page.locator("#editor-host .ProseMirror")).toContainText(text);
+});
+
+test("spec: 新しい復旧キーの保存を確認しなければ復旧は確定せず、元の復旧キーが使える", async ({ page, browser }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  const recoveryKey = await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+
+  const otherContext = await browser.newContext({ locale: "ja-JP" });
+  const other = await otherContext.newPage();
+  await installVirtualAuthenticator(other, { hasPrf: true });
+  await submitRecoveryKey(other, recoveryKey);
+  await expect(other.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await other.getByRole("button", { name: "あとで" }).click();
+  await expect(other.locator("#gate-footnote")).toContainText("復旧を完了していません", { timeout: 30000 });
+  await expect(other.locator("#app")).toBeHidden();
+  await otherContext.close();
+
+  // The first device is untouched, and the same key still recovers.
+  expect(await page.evaluate(async () => (await fetch("/api/v1/session", { credentials: "same-origin" })).status)).toBe(200);
+  const again = await browser.newContext({ locale: "ja-JP" });
+  const retry = await again.newPage();
+  await installVirtualAuthenticator(retry, { hasPrf: true });
+  await submitRecoveryKey(retry, recoveryKey);
+  await expect(retry.getByText("復旧キーを保存してください")).toBeVisible({ timeout: 30000 });
+  await retry.getByRole("button", { name: "保存しました" }).click();
+  await expect(retry.locator("#app")).toBeVisible({ timeout: 30000 });
+  await again.close();
+});
+
+test("spec: パスキーとセッションを一覧し、別のセッションを終了できる", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const sessionCount = () => page.evaluate(async () => {
+    const response = await fetch("/api/v1/sessions", { credentials: "same-origin" });
+    return ((await response.json()) as { sessions: unknown[] }).sessions.length;
+  });
+
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーとセッション" }).click();
+  const dialog = page.locator("dialog");
+  await expect(dialog).toContainText("パスキー1");
+  await expect(dialog).toContainText("このブラウザー");
+  // One passkey: nothing may be revoked, so no revoke action is offered.
+  await expect(dialog.getByRole("button", { name: /^失効:/ })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /^終了:/ })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "閉じる" }).click();
+
+  // Losing the cookie (another browser, cleared data) and signing in again
+  // leaves the earlier session alive on the server: it must be listed and
+  // endable from here.
+  await page.context().clearCookies();
+  await page.reload();
+  await page.getByRole("button", { name: "パスキーで開く" }).click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  expect(await sessionCount()).toBe(2);
+
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーとセッション" }).click();
+  await expect(dialog).toContainText("別のセッション");
+  await dialog.getByRole("button", { name: /^終了: 別のセッション/ }).click();
+  await expect(page.locator("#toast")).toHaveText("セッションを終了しました。", { timeout: 15000 });
+  expect(await sessionCount()).toBe(1);
+});
+
+test("spec: 2本目のパスキーは再認証を経て失効でき、最後の1本は残る", async ({ page }) => {
+  const first = await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+
+  // Add a second passkey on another authenticator, then bring the first back
+  // so the step-up for the revocation can be answered.
+  let secondId = "";
+  await page.route("**/api/v1/credentials/options", async (route) => {
+    ({ authenticatorId: secondId } = await first.client.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2", transport: "usb", hasResidentKey: true, hasUserVerification: true,
+        isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true,
+      },
+    }));
+    await first.client.send("WebAuthn.setAutomaticPresenceSimulation", { authenticatorId: first.authenticatorId, enabled: false });
+    await route.continue();
+  });
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーを追加" }).click();
+  await expect(page.locator("#toast")).toHaveText("パスキーを追加しました。", { timeout: 30000 });
+  await page.unroute("**/api/v1/credentials/options");
+  await first.client.send("WebAuthn.setAutomaticPresenceSimulation", { authenticatorId: first.authenticatorId, enabled: true });
+  await first.client.send("WebAuthn.setAutomaticPresenceSimulation", { authenticatorId: secondId, enabled: false });
+
+  const activePasskeys = () => page.evaluate(async () => {
+    const response = await fetch("/api/v1/credentials", { credentials: "same-origin" });
+    const body = (await response.json()) as { credentials: Array<{ status: string }> };
+    return body.credentials.filter((entry) => entry.status === "active").length;
+  });
+  expect(await activePasskeys()).toBe(2);
+
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーとセッション" }).click();
+  const dialog = page.locator("dialog");
+  await expect(dialog.getByRole("button", { name: /^失効:/ })).toHaveCount(2);
+  await dialog.getByRole("button", { name: /^失効: パスキー2/ }).click();
+  await dialog.getByRole("button", { name: "失効する" }).click();
+  await expect(page.locator("#toast")).toHaveText("パスキーを失効しました。", { timeout: 30000 });
+  expect(await activePasskeys()).toBe(1);
+
+  // With one passkey left the screen offers no revocation at all.
+  await page.locator("#more-button").click();
+  await page.getByRole("button", { name: "パスキーとセッション" }).click();
+  await expect(dialog.getByRole("button", { name: /^失効:/ })).toHaveCount(0);
+});
+
+/** A silent 20-second PCM WAV: real, seekable audio the browser can load. */
+function silentWav(seconds = 20): Buffer {
+  const sampleRate = 8000;
+  const samples = sampleRate * seconds;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + samples, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate, 28); // byte rate (8-bit mono)
+  header.writeUInt16LE(1, 32);
+  header.writeUInt16LE(8, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(samples, 40);
+  return Buffer.concat([header, Buffer.alloc(samples, 0x80)]);
+}
+
+test("spec: 他のタブの保存を取り込んでも、変わっていないメディアは読み込み直されず再生位置を保つ", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("音声の前。");
+  await page.locator("#file-input").setInputFiles({ name: "t.wav", mimeType: "audio/wav", buffer: silentWav() });
+  await expect(page.locator("#editor-host audio")).toBeAttached({ timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+
+  // Load the stream through the Service Worker, seek into it, and watch for
+  // anything that would reset the element from here on.
+  await page.waitForFunction(() => (document.querySelector("#editor-host audio") as HTMLAudioElement | null)?.getAttribute("src"), undefined, { timeout: 30000 });
+  await page.evaluate(async () => {
+    const audio = document.querySelector("#editor-host audio") as HTMLAudioElement & { __resets?: number; __kept?: boolean };
+    audio.preload = "auto";
+    audio.load();
+    await new Promise<void>((resolve, reject) => {
+      audio.addEventListener("loadedmetadata", () => resolve(), { once: true });
+      audio.addEventListener("error", () => reject(new Error("audio failed to load")), { once: true });
+    });
+    audio.currentTime = 7;
+    await new Promise<void>((resolve) => audio.addEventListener("seeked", () => resolve(), { once: true }));
+    audio.__kept = true;
+    audio.__resets = 0;
+    for (const type of ["emptied", "loadstart", "abort"]) audio.addEventListener(type, () => { audio.__resets = (audio.__resets ?? 0) + 1; });
+  });
+
+  // A second tab of the same browser edits the text and saves.
+  const second = await page.context().newPage();
+  await second.goto(BASE);
+  await expect(second.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(second.locator("#editor-host .ProseMirror")).toContainText("音声の前。");
+  await second.locator("#editor-host .ProseMirror p").first().click();
+  await second.keyboard.press("Home");
+  await second.keyboard.type("別タブの追記。");
+  await waitForSync(second);
+
+  await expect(editor).toContainText("別タブの追記。", { timeout: 30000 });
+  await page.waitForTimeout(800); // the Service Worker acknowledgement that follows an apply
+  const state = await page.evaluate(() => {
+    const audio = document.querySelector("#editor-host audio") as (HTMLAudioElement & { __resets?: number; __kept?: boolean }) | null;
+    return {
+      sameElement: audio?.__kept === true,
+      resets: audio?.__resets,
+      position: Math.round(audio?.currentTime ?? -1),
+      hasSource: Boolean(audio?.getAttribute("src")),
+    };
+  });
+  expect(state).toEqual({ sameElement: true, resets: 0, position: 7, hasSource: true });
+  await second.close();
+});
+
+test("spec: 画面外の画像は表示が近づくまで取得・復号しない", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  // Several screens of text, then the image at the very end.
+  await page.keyboard.insertText(Array.from({ length: 400 }, (_, index) => `行${index}`).join("\n"));
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAHUlEQVQoU2NkYGD4z0AEYBxVSFJIYWBgYPgPjQMAoBUGb0kC9XkAAAAASUVORK5CYII=",
+    "base64",
+  );
+  await page.locator("#file-input").setInputFiles({ name: "t.png", mimeType: "image/png", buffer: png });
+  await expect(page.locator("#editor-host .txt-media")).toBeAttached({ timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1500);
+  await waitForSync(page);
+
+  let cipherFetches = 0;
+  page.on("request", (request) => { if (/\/media\/[^/]+\/cipher/.test(request.url())) cipherFetches += 1; });
+  await page.reload();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("行399");
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(1500);
+  expect(cipherFetches).toBe(0);
+
+  await page.locator("#editor-host .txt-media").scrollIntoViewIfNeeded();
+  await page.waitForFunction(() => {
+    const img = document.querySelector("#editor-host img") as HTMLImageElement | null;
+    return !!img && img.naturalWidth > 0;
+  }, undefined, { timeout: 60000 });
+  expect(cipherFetches).toBeGreaterThan(0);
+});
+
+test("spec: 貼り付け・ドロップされたHTMLでメディア要素を偽装できず、文書は保存できるまま", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("本文。");
+  await waitForSync(page);
+
+  // Markup shaped like this app's own media block, naming media that does not
+  // exist. Accepting it would put an unknown reference into the document and
+  // every later save would be refused.
+  const forged =
+    '<div class="txt-media" data-media-id="66666666-6666-4666-8666-666666666666" data-media-kind="video"></div><p>偽装の後。</p>';
+  await page.evaluate((html) => {
+    const target = document.querySelector("#editor-host .ProseMirror")!;
+    const pasted = new DataTransfer();
+    pasted.setData("text/html", html); // no text/plain: the HTML parser is the only path
+    target.dispatchEvent(new ClipboardEvent("paste", { clipboardData: pasted, bubbles: true, cancelable: true }));
+
+    const dropped = new DataTransfer();
+    dropped.setData("text/html", html);
+    dropped.setData("text/plain", "ドロップ文。");
+    const box = target.getBoundingClientRect();
+    target.dispatchEvent(new DragEvent("drop", {
+      dataTransfer: dropped, bubbles: true, cancelable: true,
+      clientX: box.left + 20, clientY: box.top + 10,
+    }));
+  }, forged);
+
+  await page.waitForTimeout(300);
+  expect(await editor.locator(".txt-media, [data-media-id]").count()).toBe(0);
+  expect(pageErrors).toEqual([]);
+
+  // The sheet is still a valid document: a further edit saves.
+  await editor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type("続き。");
+  await waitForSync(page);
+  await expect(page.locator("#sync-status")).not.toHaveAttribute("data-state", "local-only");
+  const saved = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/document", { credentials: "same-origin" });
+    return ((await response.json()) as { revision: number }).revision;
+  });
+  expect(saved).toBeGreaterThanOrEqual(2);
+});
+
+test("spec: サーバーが以前より古い版を返しても黙って適用せず、明示的に選んだときだけ開く", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  const editor = page.locator("#editor-host .ProseMirror");
+  await editor.click();
+  await page.keyboard.type("第一版。");
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+
+  // An authentic, correctly encrypted, but older copy of the sheet.
+  const older = await page.evaluate(async () => {
+    const response = await fetch("/api/v1/document", { credentials: "same-origin", cache: "no-store" });
+    return { etag: response.headers.get("etag") ?? "", body: await response.text() };
+  });
+  expect((JSON.parse(older.body) as { revision: number }).revision).toBeGreaterThanOrEqual(1);
+
+  await editor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.type("第二版の追記。");
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+
+  // From here on the "server" answers every read with the older copy.
+  await page.route("**/api/v1/document", (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    return route.fulfill({
+      status: 200,
+      headers: { "content-type": "application/json", etag: older.etag, "cache-control": "private, no-store" },
+      body: older.body,
+    });
+  });
+
+  // While the page is open: the poll must not replace what is on screen.
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(page.locator("#sync-status")).toContainText("以前の版に戻されています", { timeout: 30000 });
+  await expect(editor).toContainText("第二版の追記。");
+
+  // On reload: the gate explains instead of opening the older copy.
+  await page.reload();
+  await expect(page.getByText("以前より古い内容です")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#app")).toBeHidden();
+
+  // Only an explicit choice opens it.
+  await page.getByRole("button", { name: "この古い版を開く" }).click();
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await expect(page.locator("#editor-host .ProseMirror")).toContainText("第一版。");
+  await expect(page.locator("#editor-host .ProseMirror")).not.toContainText("第二版の追記。");
 });

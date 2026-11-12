@@ -67,6 +67,24 @@ export interface RecoveryRecord {
   wrappedKey: string;
 }
 
+export interface CredentialSummary {
+  credentialId: string;
+  deviceType: string;
+  backedUp: boolean;
+  status: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+}
+
+export interface SessionSummary {
+  sid: string;
+  scope: string;
+  createdAt: number;
+  expiresAt: number;
+  idleExpiresAt: number;
+  isCurrent: boolean;
+}
+
 class ApiClient {
   private async request<T>(
     path: string,
@@ -180,6 +198,27 @@ class ApiClient {
     return this.request<{ envelopes: KeyEnvelope[]; recovery: RecoveryRecord | null }>(
       `/api/v1/keys${query}`,
     );
+  }
+
+  credentials() {
+    return this.request<{ credentials: CredentialSummary[] }>("/api/v1/credentials");
+  }
+
+  revokeCredential(credentialId: string) {
+    return this.request<{ ok: boolean }>(
+      `/api/v1/credentials/${encodeURIComponent(credentialId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  sessions() {
+    return this.request<{ sessions: SessionSummary[] }>("/api/v1/sessions");
+  }
+
+  revokeSession(sid: string) {
+    return this.request<{ ok: boolean }>(`/api/v1/sessions/${encodeURIComponent(sid)}`, {
+      method: "DELETE",
+    });
   }
 
   credentialAddOptions(userHandle: string) {

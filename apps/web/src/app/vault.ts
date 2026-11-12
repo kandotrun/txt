@@ -36,7 +36,19 @@ export interface UnlockedVault {
   keyVersion: number;
 }
 
-/** Wraps the vault key for a credential and returns the envelope payload. */
+/**
+ * Overwrites key material that is no longer needed (spec §6.4). JavaScript
+ * cannot promise that no copy survives elsewhere, but a PRF output, a KEK or
+ * a recovery seed should not sit in a live buffer after its single use.
+ */
+export function wipe(...buffers: Array<Uint8Array | null | undefined>): void {
+  for (const buffer of buffers) buffer?.fill(0);
+}
+
+/**
+ * Wraps the vault key for a credential and returns the envelope payload.
+ * The PRF output is consumed: it is wiped once the KEK has been used.
+ */
 async function buildEnvelope(options: {
   vaultKey: Uint8Array;
   prfOutput: Uint8Array;
@@ -52,14 +64,18 @@ async function buildEnvelope(options: {
   const wrapSalt = randomBytes(32);
   const kek = await deriveKek(options.prfOutput, wrapSalt, options.accountId, options.credentialId);
   const aad = vaultKeyAad(FORMAT_VERSION, KEY_VERSION, options.accountId, options.credentialId);
-  const { nonce, wrappedKey } = await wrapVaultKey(options.vaultKey, kek, aad);
-  return {
-    formatVersion: FORMAT_VERSION,
-    keyVersion: KEY_VERSION,
-    wrapSalt32: toBase64Url(wrapSalt),
-    nonce: toBase64Url(nonce),
-    wrappedKey: toBase64Url(wrappedKey),
-  };
+  try {
+    const { nonce, wrappedKey } = await wrapVaultKey(options.vaultKey, kek, aad);
+    return {
+      formatVersion: FORMAT_VERSION,
+      keyVersion: KEY_VERSION,
+      wrapSalt32: toBase64Url(wrapSalt),
+      nonce: toBase64Url(nonce),
+      wrappedKey: toBase64Url(wrappedKey),
+    };
+  } finally {
+    wipe(kek, options.prfOutput);
+  }
 }
 
 async function unwrapFromEnvelope(options: {
@@ -81,12 +97,16 @@ async function unwrapFromEnvelope(options: {
     options.accountId,
     options.credentialId,
   );
-  return unwrapVaultKey(
-    kek,
-    fromBase64Url(options.envelope.nonce),
-    fromBase64Url(options.envelope.wrappedKey),
-    aad,
-  );
+  try {
+    return await unwrapVaultKey(
+      kek,
+      fromBase64Url(options.envelope.nonce),
+      fromBase64Url(options.envelope.wrappedKey),
+      aad,
+    );
+  } finally {
+    wipe(kek, options.prfOutput);
+  }
 }
 
 export interface RegistrationResult {
@@ -126,6 +146,7 @@ export async function registerAccount(): Promise<RegistrationResult> {
   );
   const recoveryKeyText = await formatRecoveryKey(accountId, recoverySeed);
   const authHash = await crypto.subtle.digest("SHA-256", recoveryAuth as BufferSource);
+  wipe(recoverySeed, recoveryAuth, recoveryKek);
 
   const documentId = crypto.randomUUID();
   const bootstrapId = crypto.randomUUID();
@@ -213,7 +234,6 @@ export async function loginAndUnlock(): Promise<UnlockedVault> {
 export interface RecoveryOutcome {
   vaultKey: Uint8Array;
   accountId: string;
-  newRecoveryKeyText: string;
 }
 
 /**
@@ -221,7 +241,15 @@ export interface RecoveryOutcome {
  * RecoveryAuth is sent. After unlocking, a new passkey is registered and the
  * recovery record is replaced atomically.
  */
-export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryOutcome> {
+export async function recoverWithKey(
+  recoveryKeyText: string,
+  /**
+   * Shows the replacement recovery key and resolves true once the user has
+   * kept it. Recovery is only committed after that (spec §7.2): until then the
+   * old key, the old passkeys and the old sessions all stay valid.
+   */
+  confirmNewKey: (newRecoveryKeyText: string) => Promise<boolean>,
+): Promise<RecoveryOutcome> {
   const parsed = await parseRecoveryKey(recoveryKeyText);
   const recoveryAuth = await deriveRecoveryAuth(parsed.seed, parsed.accountId);
   await api.recoveryStart(parsed.accountId, toBase64Url(recoveryAuth));
@@ -238,8 +266,10 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
     fromBase64Url(recovery.wrappedKey),
     aad,
   );
+  wipe(parsed.seed, recoveryAuth, recoveryKek);
 
-  // Register a new passkey for this account and rotate the recovery record.
+  // Register a new passkey for this account and prepare the new recovery
+  // record. Nothing is stored on the server yet.
   const userHandle = await currentUserHandle();
   const addOptions = await api.recoveryOptions();
   const created = await createCredential(addOptions.options);
@@ -257,6 +287,15 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
     accountId: parsed.accountId,
     credentialId: created.credentialId,
   });
+  const newRecoveryKeyText = await formatRecoveryKey(parsed.accountId, newSeed);
+  wipe(newSeed, newAuth, newKek);
+
+  if (!(await confirmNewKey(newRecoveryKeyText))) {
+    wipe(vaultKey);
+    throw new Error(
+      t("新しい復旧キーの保存を確認できなかったため、復旧を完了していません。今までの復旧キーは引き続き使えます。"),
+    );
+  }
 
   await api.recoveryComplete({
     operationId: crypto.randomUUID(),
@@ -272,11 +311,7 @@ export async function recoverWithKey(recoveryKeyText: string): Promise<RecoveryO
     },
   });
 
-  return {
-    vaultKey,
-    accountId: parsed.accountId,
-    newRecoveryKeyText: await formatRecoveryKey(parsed.accountId, newSeed),
-  };
+  return { vaultKey, accountId: parsed.accountId };
 }
 
 /** Reads the account's userHandle from /session (owner-only field). */
@@ -337,6 +372,8 @@ export async function rotateRecoveryKey(options: {
   const aad = recoveryAad(options.accountId, version, KEY_VERSION);
   const { nonce, wrappedKey } = await wrapVaultKey(options.vaultKey, kek, aad);
   const authHash = await crypto.subtle.digest("SHA-256", auth as BufferSource);
+  const recoveryKeyText = await formatRecoveryKey(options.accountId, seed);
+  wipe(seed, auth, kek);
 
   await api.rotateRecovery({
     recoveryVersion: version,
@@ -345,7 +382,7 @@ export async function rotateRecoveryKey(options: {
     nonce: toBase64Url(nonce),
     wrappedKey: toBase64Url(wrappedKey),
   });
-  return formatRecoveryKey(options.accountId, seed);
+  return recoveryKeyText;
 }
 
 /** Unlocks an existing account whose session is valid but whose vault is locked. */

@@ -139,6 +139,33 @@ const EN: Record<string, string> = {
   "パスキーの作成が完了しませんでした。": "Passkey creation didn't complete.",
   "パスキーの操作が完了しませんでした。": "The passkey operation didn't complete.",
 
+  // Passkeys and sessions
+  パスキーとセッション: "Passkeys and sessions",
+  パスキー: "Passkeys",
+  セッション: "Sessions",
+  "パスキー{number}（{date} 登録）": "Passkey {number} (added {date})",
+  "（いま使用中）": " (in use now)",
+  "このブラウザー（{date} 開始）": "This browser (since {date})",
+  "別のセッション（{date} 開始）": "Another session (since {date})",
+  "失効: {name}": "Revoke: {name}",
+  "終了: {name}": "End: {name}",
+  パスキーを失効しますか: "Revoke this passkey?",
+  "このパスキーでは今後開けなくなります。ほかのパスキーと復旧キーは変わりません。":
+    "This passkey will no longer open the sheet. Your other passkeys and your recovery key are unchanged.",
+  失効する: "Revoke",
+  "パスキーを失効しました。": "Passkey revoked.",
+  "セッションを終了しました。": "Session ended.",
+
+  // Rollback detection / recovery order
+  "サーバーの内容が以前の版に戻されています。適用していません。再読み込みして確認してください。":
+    "The server returned an older version. It was not applied. Reload to review.",
+  "サーバーの内容が、この端末で以前に開いた版より古くなっています":
+    "The server's copy is older than one this device has already opened",
+  以前より古い内容です: "This is an older copy",
+  この古い版を開く: "Open this older copy",
+  "新しい復旧キーの保存を確認できなかったため、復旧を完了していません。今までの復旧キーは引き続き使えます。":
+    "Recovery was not completed because the new recovery key was not confirmed as saved. Your current recovery key still works.",
+
   // "More" menu
   この端末の保持を解除: "Stop keeping on this device",
   "この端末に保持（30日）": "Keep on this device (30 days)",

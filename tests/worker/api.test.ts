@@ -73,10 +73,13 @@ function coseFromRaw(raw: Uint8Array): Uint8Array {
   return new Uint8Array(parts);
 }
 
+/** Flipped by a test that needs a ceremony reported as cross-origin framed. */
+let clientDataCrossOrigin = false;
+
 async function clientDataJSON(challenge: string, type: string, origin = BASE): Promise<string> {
   return b64url(
     new TextEncoder().encode(
-      JSON.stringify({ type, challenge, origin, crossOrigin: false }),
+      JSON.stringify({ type, challenge, origin, crossOrigin: clientDataCrossOrigin }),
     ),
   );
 }
@@ -1718,6 +1721,26 @@ describe("hardening: login", () => {
     expect(cookieFrom(verify)).toBeUndefined();
   });
 
+  it("spec: rejects a ceremony that ran inside a cross-origin frame", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const options = await postJson("/api/v1/auth/login/options", {});
+    const { options: { challenge } } = (await options.json()) as { options: { challenge: string } };
+    clientDataCrossOrigin = true;
+    let response: Record<string, unknown>;
+    try {
+      // Correctly signed by the real passkey: only the framing flag differs.
+      response = await assertionResponse(account.credential, {
+        challenge, rpId: "txt.2-38.com", userHandle: account.userHandle,
+      });
+    } finally {
+      clientDataCrossOrigin = false;
+    }
+    const verify = await postJson("/api/v1/auth/login/verify", { response });
+    expect.soft(verify.status).toBe(400);
+    expect(cookieFrom(verify)).toBeUndefined();
+  });
+
   it("spec: a failed verification does not echo the verifier's diagnostics", async () => {
     const account = await registerAccount();
     await bootstrapAccount(account);
@@ -1731,6 +1754,19 @@ describe("hardening: login", () => {
     expect(await verify.json()).toEqual({
       error: { code: "UNAUTHORIZED", message: "authentication verification failed" },
     });
+  });
+});
+
+describe("hardening: document limits", () => {
+  it("spec: refuses more media references than a document may hold, before touching storage", async () => {
+    const account = await registerAccount();
+    await bootstrapAccount(account);
+    const etag = (await getDocument(account)).headers.get("etag") as string;
+    const ids = Array.from({ length: 201 }, () => crypto.randomUUID()).sort();
+    const response = await putDocument(account, etag, documentPutBody({ referencedMediaIds: ids }));
+    expect.soft(response.status).toBe(422);
+    expect(((await response.json()) as { error: { message: string } }).error.message)
+      .toBe("referencedMediaIds has too many entries");
   });
 });
 

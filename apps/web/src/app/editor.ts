@@ -70,15 +70,10 @@ export const schema = new Schema({
         },
         0,
       ],
-      parseDOM: [
-        {
-          tag: "div[data-media-id]",
-          getAttrs: (dom) => ({
-            mediaId: (dom as HTMLElement).getAttribute("data-media-id"),
-            kind: (dom as HTMLElement).getAttribute("data-media-kind") ?? "image",
-          }),
-        },
-      ],
+      // Deliberately no `parseDOM`: a media block is only ever created by this
+      // app from an upload it performed. Pasted or dropped HTML that imitates
+      // the markup above must not be able to name a media id — an unknown
+      // reference would make every later save fail validation (spec §8).
     },
   },
   marks: {},
@@ -240,6 +235,11 @@ export class Editor {
     return this.view.composing || this.compositionState === "composing";
   }
 
+  /** True when the document is a single empty text block (spec §4.1). */
+  get isEmpty(): boolean {
+    return isEmptyDoc(this.view.state.doc);
+  }
+
   /** True when it is safe to synchronize or apply a remote version. */
   isSafePoint(): boolean {
     return this.compositionState === "idle" && !this.view.composing;
@@ -343,20 +343,24 @@ export class Editor {
     this.applyTransaction(transaction);
   }
 
-  /** Applies a remote document with best-effort selection preservation. */
+  /**
+   * Applies a remote document by replacing only the blocks that differ.
+   *
+   * Blocks before and after the changed range are left untouched, so their
+   * DOM — including media elements and a playing video — keeps its identity
+   * (spec §9.7, §9.8), and the selection is mapped through the change instead
+   * of being clamped. The step is not undoable: Undo must never revert what
+   * another device saved.
+   */
   applyRemoteDocument(document: DocumentModel): void {
-    const previousSelection = this.view.state.selection.from;
-    this.replaceDocument(document);
-    const max = this.view.state.doc.content.size;
-    const target = Math.max(1, Math.min(previousSelection, max));
-    try {
-      const selection = TextSelection.near(this.view.state.doc.resolve(target));
-      this.withExternalApply(() => {
-        this.view.dispatch(this.view.state.tr.setSelection(selection));
-      });
-    } catch {
-      // A stale position simply keeps the default selection.
-    }
+    const current = this.view.state.doc;
+    const next = buildDocFromDocument(document);
+    const range = changedBlockRange(current, next);
+    if (!range) return;
+    const transaction = this.view.state.tr
+      .replaceWith(range.from, range.to, range.replacement)
+      .setMeta("addToHistory", false);
+    this.withExternalApply(() => this.view.dispatch(transaction));
   }
 
   /** Clears history so a remote adoption cannot be undone (spec §9.7). */
@@ -447,6 +451,35 @@ export class Editor {
   }
 }
 
+/**
+ * The smallest top-level block range that turns `current` into `next`, as
+ * positions in `current` plus the blocks to put there. Null when the two
+ * documents are already equal.
+ */
+export function changedBlockRange(
+  current: PMNode,
+  next: PMNode,
+): { from: number; to: number; replacement: PMNode[] } | null {
+  const shared = Math.min(current.childCount, next.childCount);
+  let prefix = 0;
+  while (prefix < shared && current.child(prefix).eq(next.child(prefix))) prefix += 1;
+  if (prefix === current.childCount && prefix === next.childCount) return null;
+  let suffix = 0;
+  while (
+    suffix < shared - prefix &&
+    current.child(current.childCount - 1 - suffix).eq(next.child(next.childCount - 1 - suffix))
+  ) {
+    suffix += 1;
+  }
+  let from = 0;
+  for (let index = 0; index < prefix; index++) from += current.child(index).nodeSize;
+  let to = current.content.size;
+  for (let index = 0; index < suffix; index++) to -= current.child(current.childCount - 1 - index).nodeSize;
+  const replacement: PMNode[] = [];
+  for (let index = prefix; index < next.childCount - suffix; index++) replacement.push(next.child(index));
+  return { from, to, replacement };
+}
+
 /** Enter/Shift+Enter inserts a literal newline (LF) inside the text block. */
 function insertLineBreak(
   state: EditorState,
@@ -482,7 +515,8 @@ function buildDocFromDocument(document: DocumentModel): PMNode {
         textType.create({ id: block.id }, block.text.length > 0 ? [schema.text(block.text)] : []),
       );
     } else {
-      nodes.push(mediaType.create({ mediaId: block.mediaId, kind: "image", id: block.id }));
+      const kind = document.media[block.mediaId]?.kind ?? "image";
+      nodes.push(mediaType.create({ mediaId: block.mediaId, kind, id: block.id }));
     }
   }
   if (nodes.length === 0) return buildEmptyDoc();
