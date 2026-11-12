@@ -19,10 +19,10 @@ describe("i18n (default environment)", () => {
 
   it("returns the Japanese source unchanged, with placeholders filled", () => {
     expect(t("閉じる")).toBe("閉じる");
-    expect(t("トークン期限 {date}", { date: "2026/11/24" })).toBe("トークン期限 2026/11/24");
-    expect(
-      t("{name}（{state}、{tokenNote}）", { name: "Clio", state: "有効", tokenNote: "トークンなし" }),
-    ).toBe("Clio（有効、トークンなし）");
+    expect(t("この端末に保持しました（{date} まで）。", { date: "2026/11/24" }))
+      .toBe("この端末に保持しました（2026/11/24 まで）。");
+    expect(t("通信に失敗しました ({code}): {message}", { code: "X", message: "y" }))
+      .toBe("通信に失敗しました (X): y");
   });
 
   it("keeps onboarding labels and share text in Japanese by default", () => {
@@ -62,10 +62,10 @@ describe("i18n (browser language detection)", () => {
     expect(mod.getLocale()).toBe("en");
     expect(mod.localeTag()).toBe("en-US");
     expect(mod.t("閉じる")).toBe("Close");
-    expect(mod.t("トークン期限 {date}", { date: "Nov 24, 2026" })).toBe("Token expires Nov 24, 2026");
-    expect(
-      mod.t("{name}（{state}、{tokenNote}）", { name: "Clio", state: "Active", tokenNote: "No token" }),
-    ).toBe("Clio (Active, No token)");
+    expect(mod.t("この端末に保持しました（{date} まで）。", { date: "Nov 24, 2026" }))
+      .toBe("Kept on this device (until Nov 24, 2026).");
+    expect(mod.t("通信に失敗しました ({code}): {message}", { code: "X", message: "y" }))
+      .toBe("Communication failed (X): y");
   });
 
   it("detects Japanese from the browser language", async () => {

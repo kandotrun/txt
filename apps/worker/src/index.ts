@@ -21,7 +21,6 @@ import { ApiError } from "./errors.ts";
 import { authRoutes, sessionRoutes } from "./routes/auth.ts";
 import { identityRoutes } from "./routes/identity.ts";
 import { documentRoutes } from "./routes/document.ts";
-import { agentRoutes } from "./routes/agents.ts";
 import { mediaRoutes } from "./routes/media.ts";
 import { accountRoutes } from "./routes/account.ts";
 import { runMaintenance } from "./maintenance.ts";
@@ -85,8 +84,7 @@ app.use("*", async (c, next) => {
 /**
  * Resource isolation for the API (spec §5.4, §14).
  *
- * The API is only ever called by this origin's own scripts (or by agents,
- * which are not browsers). A browser tells us where a request comes from, so
+ * The API is only ever called by this origin's own scripts. A browser tells us where a request comes from, so
  * anything it labels as coming from another site or origin is refused before
  * a handler runs — including GETs, which carry no CSRF marker. `none` is a
  * direct navigation and is harmless: API responses are inert JSON.
@@ -96,13 +94,11 @@ app.use("/api/*", async (c, next) => {
   if (site !== undefined && site !== "same-origin" && site !== "none") {
     return c.json({ error: { code: "ORIGIN_REJECTED", message: "origin is not allowed" } }, 403);
   }
-  // Agent requests (Bearer) are not browser requests and are authorized by
-  // their token alone (spec §5.4); every other write that names an origin
-  // must name ours — including the ceremonies that run before a session exists.
+  // Every write that names an origin must name ours — including the
+  // ceremonies that run before a session exists.
   const origin = c.req.header("origin");
   const unsafe = !["GET", "HEAD", "OPTIONS"].includes(c.req.method);
-  const agentPath = c.req.header("authorization") !== undefined;
-  if (unsafe && !agentPath && origin !== undefined && !isAllowedOrigin(origin, c.env)) {
+  if (unsafe && origin !== undefined && !isAllowedOrigin(origin, c.env)) {
     return c.json({ error: { code: "ORIGIN_REJECTED", message: "origin is not allowed" } }, 403);
   }
   await next();
@@ -127,7 +123,6 @@ app.route("/api/v1/auth", authRoutes);
 app.route("/api/v1", sessionRoutes);
 app.route("/api/v1", identityRoutes);
 app.route("/api/v1", documentRoutes);
-app.route("/api/v1", agentRoutes);
 app.route("/api/v1/media", mediaRoutes);
 app.route("/api/v1", accountRoutes);
 

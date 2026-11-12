@@ -2,7 +2,7 @@
  * Scheduled maintenance (spec §5.3, §11.8, §15).
  *
  * - Cleans stale pending accounts (24h).
- * - Purges expired and long-revoked sessions and agent tokens.
+ * - Purges expired and long-revoked sessions.
  * - Removes unreferenced ready media after the 24h grace period.
  * - Retries unfinished/cancelled multipart cleanup.
  * - Finishes account deletion by removing ciphertext objects.
@@ -57,10 +57,10 @@ async function cleanExpiredChallenges(env: Env, now: number): Promise<void> {
 
 /**
  * Token hashes that can never authorize anything again are not kept: an
- * expired or long-revoked session, an expired or long-revoked agent token and
- * an operation record past its expiry only add to what a database copy
- * reveals (spec §14). Recently revoked rows stay for a day so a session list
- * or an agent list read right after a revocation is still coherent.
+ * expired or long-revoked session and an operation record past its expiry
+ * only add to what a database copy reveals (spec §14). Recently revoked rows
+ * stay for a day so a session list read right after a revocation is still
+ * coherent.
  */
 async function purgeDeadCredentials(env: Env, now: number): Promise<void> {
   const dayAgo = now - 24 * 60 * 60 * 1000;
@@ -70,10 +70,6 @@ async function purgeDeadCredentials(env: Env, now: number): Promise<void> {
         WHERE absolute_expires_at < ?1 OR idle_expires_at < ?1
            OR (revoked_at IS NOT NULL AND revoked_at < ?2)`,
     ).bind(now, dayAgo),
-    env.DB.prepare(
-      `DELETE FROM agent_tokens
-        WHERE expires_at < ?1 OR (revoked_at IS NOT NULL AND revoked_at < ?1)`,
-    ).bind(dayAgo),
     env.DB.prepare(`DELETE FROM operations WHERE expires_at IS NOT NULL AND expires_at < ?1`).bind(now),
   ]);
 }

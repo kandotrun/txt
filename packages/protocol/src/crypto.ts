@@ -32,7 +32,7 @@ export async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 
 /**
  * HKDF-SHA256 primitive shared by every key contract in this package
- * (passkey wraps, document keys, agent wraps). New contracts must derive
+ * (passkey wraps, document keys). New contracts must derive
  * through this helper instead of re-implementing the derivation, so the byte
  * format stays identical everywhere (spec §6.3).
  */

@@ -10,15 +10,9 @@
 import { Hono } from "hono";
 
 import type { AppBindings, AppContext } from "../context.ts";
-import { requireAgent, requireAuth } from "../context.ts";
+import { requireAuth } from "../context.ts";
 import { assertWriteRequestAllowed, touchSession } from "../auth/sessions.ts";
-import {
-  AGENT_READ_SCOPE,
-  AGENT_WRITE_SCOPE,
-  hasAuthorizationHeader,
-} from "../auth/agent.ts";
-import type { AgentAuthContext } from "../auth/agent.ts";
-import { ApiError, badRequest, preconditionRequired } from "../errors.ts";
+import { badRequest, preconditionRequired } from "../errors.ts";
 import {
   applyDocumentUpdate,
   encodeBase64Url,
@@ -32,32 +26,14 @@ import { nowMs } from "../util.ts";
 
 const routes = new Hono<AppBindings>();
 
-/**
- * Resolves the reader of GET /document: a Web cookie session OR an agent
- * Bearer token (design §5.2, §7.2). The two are never combined — a request
- * carrying both a session cookie and an Authorization header is rejected
- * rather than resolved ambiguously, and the Web resolver itself still
- * refuses Authorization outright (spec §5.4). The document handler below is
- * shared; only the authorization source differs.
- */
-async function resolveDocumentReader(
-  c: AppContext,
-): Promise<{ accountId: string; agent: AgentAuthContext | null }> {
-  const hasCookie = (c.req.header("cookie") ?? "").length > 0;
-  const hasBearer = hasAuthorizationHeader(c.req.raw);
-  if (hasCookie && hasBearer) {
-    throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
-  }
-  if (hasBearer) {
-    const agent = await requireAgent(c, AGENT_READ_SCOPE);
-    return { accountId: agent.accountId, agent };
-  }
+/** The reader of GET /document: an active Web cookie session. */
+async function resolveDocumentReader(c: AppContext): Promise<{ accountId: string }> {
   const auth = await requireAuth(c);
   if (auth.scope === "pending") {
     throw badRequest("document is not available before bootstrap completes");
   }
   await touchSession(c.env, auth);
-  return { accountId: auth.accountId, agent: null };
+  return { accountId: auth.accountId };
 }
 
 routes.get("/document", async (c) => {
@@ -154,20 +130,6 @@ async function applyDocumentPut(c: AppContext, accountId: string) {
 }
 
 routes.put("/document", async (c) => {
-  // Agent path (design §5.2, §7.2; phase 2): a Bearer-carrying PUT is
-  // resolved ONLY as an agent token — 401 for an invalid token, 403 for a
-  // valid token without `agent:write` — and never falls through to the
-  // cookie path. Cookie + Bearer together stay ambiguous and are refused,
-  // exactly like the GET path. The agent path has no Origin/X-Txt-Request
-  // CSRF check: it is not a browser client, and the token is the credential.
-  if (hasAuthorizationHeader(c.req.raw)) {
-    const hasCookie = (c.req.header("cookie") ?? "").length > 0;
-    if (hasCookie) {
-      throw new ApiError(401, "UNAUTHORIZED", "ambiguous authentication");
-    }
-    const agent = await requireAgent(c, AGENT_WRITE_SCOPE);
-    return applyDocumentPut(c, agent.accountId);
-  }
   const auth = await requireAuth(c);
   assertWriteRequestAllowed(c.req.raw, auth.via, c.env);
   if (auth.scope !== "active") {

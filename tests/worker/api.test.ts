@@ -1338,7 +1338,8 @@ describe("Web-only contract", () => {
       method: "PUT", headers: { ...headers, "content-type": "application/json", "if-match": before.headers.get("etag")! },
       body: JSON.stringify(documentPutBody()),
     });
-    expect.soft(write.status).toBe(401);
+    // A foreign Origin is refused before authentication is even considered.
+    expect.soft(write.status).toBe(origin === "https://evil.example" ? 403 : 401);
     expect(await (await getDocument(account)).json()).toEqual(snapshot);
   });
 

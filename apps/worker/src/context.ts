@@ -7,8 +7,6 @@ import type { Env } from "./types.ts";
 import type { AuthContext } from "./auth/sessions.ts";
 import { ApiError } from "./errors.ts";
 import { assertScopeAllowsRoute, isDevelopmentEnv, resolveSession } from "./auth/sessions.ts";
-import type { AgentAuthContext } from "./auth/agent.ts";
-import { requireAgentAuth, touchAgentAuth } from "./auth/agent.ts";
 import { nowMs, sha256, toHex } from "./util.ts";
 import { tooManyRequests } from "./errors.ts";
 
@@ -87,32 +85,4 @@ export async function enforceRateLimit(
  */
 export function rateLimitScale(env: Env): number {
   return isDevelopmentEnv(env) ? 20 : 1;
-}
-
-/** Agent requests per 10 minutes: per token, and per network for any Bearer. */
-export const AGENT_TOKEN_REQUEST_LIMIT = 600;
-export const AGENT_NETWORK_REQUEST_LIMIT = 1200;
-const AGENT_WINDOW_MS = 10 * 60 * 1000;
-
-/**
- * Authorizes an agent (Bearer) request. The agent path has no Origin or CSRF
- * check — it is not a browser — so the token and these limits are its whole
- * defence (spec §5.4): every Bearer attempt counts against its network before
- * the token is even looked up, and a valid token has its own budget.
- */
-export async function requireAgent(c: AppContext, scope: string): Promise<AgentAuthContext> {
-  const scale = rateLimitScale(c.env);
-  await enforceRateLimit(c, {
-    bucketKey: await clientBucketKey(c, "agent:request"),
-    limit: AGENT_NETWORK_REQUEST_LIMIT * scale,
-    windowMs: AGENT_WINDOW_MS,
-  });
-  const agent = await requireAgentAuth(c.req.raw, c.env, scope);
-  await enforceRateLimit(c, {
-    bucketKey: `agent:token:${agent.tokenId}`,
-    limit: AGENT_TOKEN_REQUEST_LIMIT * scale,
-    windowMs: AGENT_WINDOW_MS,
-  });
-  await touchAgentAuth(c.env, agent);
-  return agent;
 }

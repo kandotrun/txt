@@ -1,1 +1,0 @@
-{"compilerOptions":{"lib":["ES2022","DOM","DOM.Iterable"],"types":["node"]},"extends":"../../tsconfig.base.json","include":["src/**/*.ts","build.mjs"]}

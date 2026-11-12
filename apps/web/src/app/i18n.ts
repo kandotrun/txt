@@ -43,7 +43,6 @@ const EN: Record<string, string> = {
   はじめて使う: "Get started",
   やめる: "Cancel",
   続ける: "Continue",
-  進む: "Continue",
   再試行: "Retry",
   パスキーで開く: "Open with a passkey",
   "パスキーを確認しています……": "Checking your passkey…",
@@ -139,57 +138,6 @@ const EN: Record<string, string> = {
   "パスキーの操作に失敗しました。": "The passkey operation failed.",
   "パスキーの作成が完了しませんでした。": "Passkey creation didn't complete.",
   "パスキーの操作が完了しませんでした。": "The passkey operation didn't complete.",
-
-  // Agents
-  名称未設定: "Unnamed",
-  有効: "Active",
-  登録途中: "Pending",
-  失効済み: "Revoked",
-  "トークン期限 {date}": "Token expires {date}",
-  トークンなし: "No token",
-  "{name}（{state}、{tokenNote}）": "{name} ({state}, {tokenNote})",
-  "登録済みのエージェントはありません。": "No agents registered.",
-  "エージェントはこの端末の外で復号します。本文がエージェント側へ渡る範囲を確認してから追加してください。":
-    "Agents decrypt outside this device. Check what part of your sheet will reach the agent before adding one.",
-  エージェント: "Agents",
-  エージェントを追加: "Add an agent",
-  "失効: {name}": "Revoke: {name}",
-  エージェントを失効しますか: "Revoke this agent?",
-  "{name} の鍵ラップとトークンが無効になり、以後このエージェントは本文を取得できなくなります。":
-    "The key wrap and tokens for {name} will be invalidated, and this agent will no longer be able to fetch the sheet.",
-  失効する: "Revoke",
-  "エージェントを失効しました。": "Agent revoked.",
-  "MCPサーバー側で登録コマンドを実行し、このペアリングコードを入力してください。表示された公開鍵を下へ貼り付けると、この画面から登録を進められます（MCP側で公開鍵を送信済みの場合は空欄のまま進んでください）。":
-    "Run the enrollment command on the MCP server and enter this pairing code. Paste the public key it shows below to continue registration here (if the MCP side already submitted its public key, leave it blank).",
-  "ペアリングコード: {code}": "Pairing code: {code}",
-  "登録ID: {id}": "Enrollment ID: {id}",
-  表示名: "Display name",
-  "エージェントの公開鍵（任意）": "Agent public key (optional)",
-  "公開鍵がまだ登録されていません。MCP側で登録してから、もう一度お試しください。":
-    "No public key has been registered yet. Register it on the MCP side and try again.",
-  フィンガープリントの確認: "Check the fingerprint",
-  "MCPサーバー側に表示されたフィンガープリントと一致しますか。\n{fingerprint}":
-    "Does this match the fingerprint shown on the MCP server?\n{fingerprint}",
-  一致する: "It matches",
-  一致しない: "It doesn't match",
-  "登録を中止しました。公開鍵を確認してください。":
-    "Enrollment cancelled. Please check the public key.",
-  "ラップを保存しました。MCP側で有効化を完了してから、トークンを発行してください。":
-    "Wrap saved. Complete activation on the MCP side, then issue a token.",
-  トークンの権限: "Token permissions",
-  "読み取り専用トークンか、読み書きトークン（読み取りを含みます）を選んでください。書き込みはMCPサーバー側の安全策（追記優先・置換は承認制）の対象です。":
-    "Choose a read-only token or a read/write token (includes reading). Writes are subject to the MCP server's safeguards (append-first; replacements require approval).",
-  読み取りのみ: "Read only",
-  読み書き: "Read & write",
-  発行しない: "Don't issue",
-  "ラップと有効化は完了しました。トークンはエージェント管理から後で発行できます。":
-    "Wrap and activation are complete. You can issue a token later from agent management.",
-  "エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。":
-    "This is your agent token. It won't be shown again once you close this screen. Register it in the MCP server settings.",
-  トークン: "Token",
-  トークンを発行しました: "Token issued",
-  "AIエージェントに接続作業を任せる場合は、この手順書のリンクをAIに渡してください。":
-    "To let an AI agent handle the connection setup, give it the link to this guide.",
 
   // "More" menu
   この端末の保持を解除: "Stop keeping on this device",

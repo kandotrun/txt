@@ -28,7 +28,6 @@ The implementation standard is [`spec.md`](./spec.md) (spec version 1.5, Web-onl
 - 🔐 **End-to-end encrypted** — a passkey PRF output derives a key-encryption key that wraps a random VaultKey; the server never receives plaintext, file names, MIME types, PRF output, or keys
 - 🖼️ **Encrypted attachments** — photos, videos, and audio are encrypted per-file in chunks and streamed back with Range support
 - 🌐 **Japanese / English UI** — the interface follows your browser language on first run and can be switched any time from the **More** menu; your choice is kept on the device
-- 🤖 **AI agent connection** — your own AI agent can read and write the sheet through a local MCP server, without weakening the encryption (see below)
 - 📱 **Responsive** — desktop and mobile browsers, including Apple-device WebAuthn/PRF and an encrypted-media Service Worker
 
 ## 🔐 How the encryption works
@@ -46,23 +45,6 @@ Sessions are Cookie-only. Saves use ETag compare-and-swap with mutation IDs, so 
 > [!NOTE]
 > The server cannot verify plaintext. All content validation happens on the client, and the server is written to not trust it.
 
-## 🤖 AI agent connection
-
-You can let **your own AI agent** (for example Muse) work with your sheet:
-
-- 🔒 **E2EE is preserved** — decryption happens only inside a small MCP server running on your own machine, in memory. The server side still sees ciphertext only.
-- 🧑 **You stay in control** — adding an agent requires your passkey, a pairing code (10-minute expiry), a fingerprint comparison, and your choice of token scope (read-only, or read & write). Tokens expire after 30 days, and you can revoke an agent at any time from **More → Agents**.
-- ✍️ **Writes are conservative** — appending is the default; replacements and rollback are approval-gated, and on a conflict the agent must show you the diff instead of merging or overwriting.
-
-**Hand the guide to your agent:** the connection procedure is written for AI agents and served at stable URLs —
-
-| Language | Guide |
-| --- | --- |
-| English | https://txt.2-38.com/agents.md |
-| 日本語 | https://txt.2-38.com/agents.ja.md |
-
-Canonical sources: [`skills/txt-agent/`](./skills/txt-agent/) (also the source of [`/llms.txt`](https://txt.2-38.com/llms.txt)). Implementation details: [`apps/agent-mcp/README.md`](./apps/agent-mcp/README.md).
-
 ## 🧱 Architecture
 
 | Area | Implementation |
@@ -79,11 +61,9 @@ Canonical sources: [`skills/txt-agent/`](./skills/txt-agent/) (also the source o
 apps/
   web/          # editor, WebAuthn/PRF, crypto worker, media Service Worker, sync
   worker/       # Hono routing, auth, D1, R2, cleanup, security headers
-  agent-mcp/    # local MCP server that bridges AI agents to the sheet (decrypts on-device)
 packages/
   protocol/     # encoding, HKDF/AES-GCM contract, key derivation, document model, test vectors
 migrations/     # D1 schema
-skills/         # agent-facing skill documents (txt-agent connection guide, llms.txt)
 tests/
   protocol/     # crypto contract known-answer tests
   editor/       # document model and media insertion rules
@@ -116,7 +96,7 @@ bash scripts/smoke-prod.sh
 
 ## ✅ Implemented, and the honest limits
 
-Implemented (spec §16 phases 1–3, plus agent access and i18n in 1.4):
+Implemented (spec §16 phases 1–3, plus i18n in 1.4):
 
 - **Groundwork verified first**: Japanese IME composition state machine, media, Undo, PRF/crypto formats, chunked-ciphertext Range delivery
 - **Web foundation**: registration, recovery, sessions, encrypted documents, the shared document model, CAS, encrypted drafts (IndexedDB)
@@ -124,7 +104,6 @@ Implemented (spec §16 phases 1–3, plus agent access and i18n in 1.4):
 - **Browsers**: responsive mobile UI, Apple-device WebAuthn/PRF, encrypted-media Service Worker, Apple touch icon
 - **Onboarding & look**: a four-slide intro from "Get started", one-time hints after registration, an empty-state hint, the "type" visual basis, a centered 720px column on wide screens, animation that never moves the editing surface, `prefers-reduced-motion` support
 - **Sharing & search**: OGP / `summary_large_image` share cards (generated with `npm run brand:images`), search indexing allowed with `robots.txt`, and **More → Share txt** (shares the app URL only, never the sheet)
-- **AI agent access**: per-agent key wrap (P-256 ECDH), scoped 30-day tokens, append-first writes with approval-gated replace/rollback (design: [`docs/agent-access-design.md`](./docs/agent-access-design.md))
 - **i18n**: Japanese/English UI with browser-language detection and a manual switch (spec §4.7)
 
 Verified behaviour includes: passkey registration (residentKey required / UV required / attestation none) with real PRF output, VaultKey wrap/unwrap, recovery-key generation and verification, ETag-conditional document saves with idempotent mutation-ID retries and distinct 412/409/422 handling, chunk-encrypted attachments with `Range`/`HEAD`/`206`/`416` delivery while referenced, syncing only confirmed snapshots during IME composition, and cleanup of unreferenced media after a 24-hour grace period.

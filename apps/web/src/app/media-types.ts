@@ -4,7 +4,7 @@
  * The list is enforced twice. `classify` refuses other files when attaching.
  * `renderableMime` is the second gate, applied whenever decrypted bytes are
  * handed to the browser: the type recorded inside a document is data — another
- * client, an agent or an older build wrote it — so it is never trusted to
+ * client or an older build wrote it — so it is never trusted to
  * decide how a same-origin response is interpreted. Anything off the list
  * (HTML, SVG, scripts, PDF, ...) is served as opaque bytes.
  */

@@ -143,7 +143,7 @@ export async function resolveSession(
 /**
  * What a recovery-scoped session may call (spec §7.2): read the key wraps,
  * register the replacement passkey, confirm, and sign out. Everything else —
- * the document, media, passkey and agent management — waits for completion.
+ * the document, media and passkey management — waits for completion.
  */
 const RECOVERY_SCOPE_ROUTES: ReadonlySet<string> = new Set([
   "GET /api/v1/session",

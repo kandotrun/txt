@@ -9,8 +9,6 @@
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { api, ApiRequestError } from "./api.ts";
-import type { AgentSummary } from "./api.ts";
-import { agentFingerprintDisplay, buildAgentWrapPayload } from "./agents.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
 import { debugHookAllowed } from "./debug-hook.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
@@ -43,7 +41,7 @@ import {
 } from "./vault.ts";
 import type { UnlockedVault } from "./vault.ts";
 import { WebAuthnError, assertCredential } from "./webauthn.ts";
-import { applyStaticLocale, getLocale, localeTag, setLocale, t } from "./i18n.ts";
+import { applyStaticLocale, localeTag, setLocale, t } from "./i18n.ts";
 
 /* ------------------------------------------------------------------ */
 /* Element handles                                                     */
@@ -270,7 +268,7 @@ function showDialog(options: {
       if (settled) return;
       settled = true;
       dialog.removeEventListener("close", onClose);
-      // A dialog can show a recovery key, an agent token or document text.
+      // A dialog can show a recovery key or document text.
       // Callers keep their own references to the nodes they still need; the
       // page itself must not go on holding the content once it is answered.
       if (openToken === dialogToken) clearDialogContent();
@@ -1250,261 +1248,6 @@ async function performStepUp(): Promise<void> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Agent management (design §4.3, §7.1)                                */
-/* ------------------------------------------------------------------ */
-
-/** Absolute URL of the AI-agent connection guide for the current locale. */
-function agentGuideUrl(): string {
-  const page = getLocale() === "en" ? "agents.md" : "agents.ja.md";
-  return `${window.location.origin}/${page}`;
-}
-
-/**
- * Guide hand-off block: the user gives this URL to their own AI agent so
- * the agent can run the connection setup itself. Copying reuses the
- * recovery-key copy pattern (button feedback, no clipboard side effects
- * beyond the explicit click).
- */
-function agentGuideBlock(): HTMLElement {
-  const block = document.createElement("div");
-  block.append(
-    textParagraph(
-      t("AIエージェントに接続作業を任せる場合は、この手順書のリンクをAIに渡してください。"),
-    ),
-    textParagraph(agentGuideUrl()),
-  );
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "button secondary compact";
-  setToolButton(copy, t("コピー"), "copy");
-  copy.addEventListener("click", () => {
-    void navigator.clipboard
-      .writeText(agentGuideUrl())
-      .then(() => setToolButton(copy, t("コピーしました"), "check"))
-      .catch(() => setToolButton(copy, t("選択しました"), "check"))
-      .finally(() => {
-        window.setTimeout(() => setToolButton(copy, t("コピー"), "copy"), 2400);
-      });
-  });
-  block.append(copy);
-  return block;
-}
-
-function agentStateLabel(agent: AgentSummary): string {
-  const name = agent.displayName || t("名称未設定");
-  const state =
-    agent.state === "active" ? t("有効") : agent.state === "pending" ? t("登録途中") : t("失効済み");
-  const token = agent.tokens.find((entry) => entry.revokedAt === null);
-  const tokenNote = token
-    ? t("トークン期限 {date}", { date: new Date(token.expiresAt).toLocaleDateString(localeTag()) })
-    : t("トークンなし");
-  return t("{name}（{state}、{tokenNote}）", { name, state, tokenNote });
-}
-
-/** Lists registered agents and offers add / revoke (design §7.1). */
-async function manageAgents(): Promise<void> {
-  if (!state.unlocked) return;
-  let agents: AgentSummary[] = [];
-  try {
-    agents = (await api.agents()).agents;
-  } catch (error) {
-    toast((error as Error).message);
-    return;
-  }
-  const live = agents.filter((agent) => agent.state !== "revoked");
-  const body = document.createElement("div");
-  if (live.length === 0) {
-    body.append(textParagraph(t("登録済みのエージェントはありません。")));
-  } else {
-    for (const agent of live) body.append(textParagraph(agentStateLabel(agent)));
-  }
-  body.append(
-    textParagraph(t("エージェントはこの端末の外で復号します。本文がエージェント側へ渡る範囲を確認してから追加してください。")),
-    agentGuideBlock(),
-  );
-  const decision = await showDialog({
-    title: t("エージェント"),
-    body,
-    actions: [
-      { label: t("エージェントを追加"), value: "add" },
-      ...live.map((agent) => ({
-        label: t("失効: {name}", { name: agent.displayName || t("名称未設定") }),
-        value: `revoke:${agent.agentId}`,
-        tone: "danger" as const,
-      })),
-      { label: t("閉じる"), value: "close", primary: false },
-    ],
-  });
-  if (decision === "add") {
-    await addAgentFlow();
-    return;
-  }
-  if (decision.startsWith("revoke:")) {
-    const agentId = decision.slice("revoke:".length);
-    const target = live.find((agent) => agent.agentId === agentId);
-    const confirmed = await showDialog({
-      title: t("エージェントを失効しますか"),
-      body: t("{name} の鍵ラップとトークンが無効になり、以後このエージェントは本文を取得できなくなります。", { name: target?.displayName || t("名称未設定") }),
-      actions: [
-        { label: t("失効する"), value: "confirm", tone: "danger" },
-        { label: t("やめる"), value: "cancel", primary: false },
-      ],
-    });
-    if (confirmed === "confirm") {
-      try {
-        await performStepUp();
-        await api.revokeAgent(agentId);
-        toast(t("エージェントを失効しました。"));
-      } catch (error) {
-        toast((error as Error).message);
-      }
-    }
-  }
-}
-
-/**
- * Registration flow (design §4.3): step-up -> enrollment (pairing code) ->
- * public key (pasted here, or submitted by the agent with the code) ->
- * fingerprint comparison -> wrap + canary -> agent-side activation ->
- * token issued and shown exactly once. The token scope is the user's
- * explicit choice at issuance time: read-only by default; a write token
- * (which includes read) exists only when the user picks it (design §5.3).
- */
-async function addAgentFlow(): Promise<void> {
-  const vault = state.unlocked;
-  if (!vault) return;
-  try {
-    await performStepUp();
-    const enrollment = await api.createAgentEnrollment();
-
-    const body = document.createElement("div");
-    body.append(
-      textParagraph(
-        t("MCPサーバー側で登録コマンドを実行し、このペアリングコードを入力してください。表示された公開鍵を下へ貼り付けると、この画面から登録を進められます（MCP側で公開鍵を送信済みの場合は空欄のまま進んでください）。"),
-      ),
-      agentGuideBlock(),
-    );
-    const codeParagraph = textParagraph(t("ペアリングコード: {code}", { code: enrollment.pairingCode }));
-    body.append(codeParagraph);
-    body.append(textParagraph(t("登録ID: {id}", { id: enrollment.agentId })));
-    const nameLabel = document.createElement("label");
-    nameLabel.className = "field";
-    const nameSpan = document.createElement("span");
-    nameSpan.textContent = t("表示名");
-    const nameInput = document.createElement("textarea");
-    nameInput.rows = 1;
-    nameInput.spellcheck = false;
-    nameInput.autocomplete = "off";
-    nameLabel.append(nameSpan, nameInput);
-    const keyLabel = document.createElement("label");
-    keyLabel.className = "field";
-    const keySpan = document.createElement("span");
-    keySpan.textContent = t("エージェントの公開鍵（任意）");
-    const keyInput = document.createElement("textarea");
-    keyInput.rows = 3;
-    keyInput.spellcheck = false;
-    keyInput.autocomplete = "off";
-    keyLabel.append(keySpan, keyInput);
-    body.append(nameLabel, keyLabel);
-
-    const step = await showDialog({
-      title: t("エージェントを追加"),
-      body,
-      actions: [
-        { label: t("進む"), value: "next" },
-        { label: t("やめる"), value: "cancel", primary: false },
-      ],
-    });
-    if (step !== "next") return;
-
-    const displayName = nameInput.value.trim();
-    const pastedKey = keyInput.value.trim();
-    if (pastedKey) {
-      await api.submitAgentPublicKey(enrollment.agentId, {
-        publicKey: pastedKey,
-        ...(displayName ? { displayName } : {}),
-      });
-    }
-    const status = await api.agentEnrollment(enrollment.agentId);
-    if (!status.publicKey) {
-      toast(t("公開鍵がまだ登録されていません。MCP側で登録してから、もう一度お試しください。"));
-      return;
-    }
-
-    const fingerprint = await agentFingerprintDisplay(status.publicKey);
-    const match = await showDialog({
-      title: t("フィンガープリントの確認"),
-      body: t("MCPサーバー側に表示されたフィンガープリントと一致しますか。\n{fingerprint}", { fingerprint }),
-      actions: [
-        { label: t("一致する"), value: "yes" },
-        { label: t("一致しない"), value: "no", primary: false },
-      ],
-    });
-    if (match !== "yes") {
-      toast(t("登録を中止しました。公開鍵を確認してください。"));
-      return;
-    }
-
-    const payload = await buildAgentWrapPayload({
-      vaultKey: vault.vaultKey,
-      accountId: vault.accountId,
-      agentId: enrollment.agentId,
-      publicKeyB64: status.publicKey,
-    });
-    await api.saveAgentWrap(enrollment.agentId, { ...payload });
-
-    // The agent proves possession by returning the canary plaintext; poll
-    // briefly so the common case completes in one sitting.
-    let active = false;
-    for (let attempt = 0; attempt < 15 && !active; attempt++) {
-      await new Promise((resolve) => window.setTimeout(resolve, 2000));
-      const current = await api.agentEnrollment(enrollment.agentId).catch(() => null);
-      active = current?.state === "active";
-    }
-    if (!active) {
-      toast(t("ラップを保存しました。MCP側で有効化を完了してから、トークンを発行してください。"));
-      return;
-    }
-
-    const scopeChoice = await showDialog({
-      title: t("トークンの権限"),
-      body: t("読み取り専用トークンか、読み書きトークン（読み取りを含みます）を選んでください。書き込みはMCPサーバー側の安全策（追記優先・置換は承認制）の対象です。"),
-      actions: [
-        { label: t("読み取りのみ"), value: "agent:read" },
-        { label: t("読み書き"), value: "agent:write", primary: false },
-        { label: t("発行しない"), value: "cancel", primary: false },
-      ],
-    });
-    if (scopeChoice !== "agent:read" && scopeChoice !== "agent:write") {
-      toast(t("ラップと有効化は完了しました。トークンはエージェント管理から後で発行できます。"));
-      return;
-    }
-    const issued = await api.issueAgentToken(enrollment.agentId, scopeChoice);
-    const tokenBody = document.createElement("div");
-    tokenBody.append(
-      textParagraph(t("エージェント用トークンです。この画面を閉じると二度と表示されません。MCPサーバーの設定へ登録してください。")),
-    );
-    const tokenLabel = document.createElement("label");
-    tokenLabel.className = "field";
-    const tokenSpan = document.createElement("span");
-    tokenSpan.textContent = t("トークン");
-    const tokenInput = document.createElement("textarea");
-    tokenInput.rows = 2;
-    tokenInput.readOnly = true;
-    tokenInput.value = issued.token;
-    tokenLabel.append(tokenSpan, tokenInput);
-    tokenBody.append(tokenLabel);
-    await showDialog({
-      title: t("トークンを発行しました"),
-      body: tokenBody,
-      actions: [{ label: t("閉じる"), value: "close" }],
-    });
-  } catch (error) {
-    toast((error as Error).message);
-  }
-}
-
-/* ------------------------------------------------------------------ */
 /* "その他" menu (spec §4.6)                                           */
 /* ------------------------------------------------------------------ */
 
@@ -1523,7 +1266,6 @@ async function showMoreMenu(): Promise<void> {
       { label: t("今すぐロック"), value: "lock-now", icon: "lock" },
       { label: t("パスキーを追加"), value: "add-passkey", icon: "key" },
       { label: t("復旧キーを更新"), value: "rotate-recovery", icon: "refresh" },
-      { label: t("エージェント"), value: "agents", icon: "device" },
       { label: t("使い方"), value: "help", icon: "help" },
       { label: t("言語"), value: "language" },
       // Shares the app's URL only — never the sheet (spec §4.6).
@@ -1600,9 +1342,6 @@ async function showMoreMenu(): Promise<void> {
       } catch (error) {
         toast((error as Error).message);
       }
-      break;
-    case "agents":
-      await manageAgents();
       break;
     case "rotate-recovery": {
       try {
