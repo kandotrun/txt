@@ -344,6 +344,15 @@ export class SyncEngine {
   }
 
   private async pushOnce(): Promise<void> {
+    if (this.baseEtag === null) {
+      // No base yet: fetch first so the CAS cannot silently overwrite.
+      await this.refreshRemote({ force: true });
+      if (this.baseEtag === null) {
+        this.callbacks.onState("offline", t("サーバーに接続できません。"));
+        this.scheduleRetry();
+        return;
+      }
+    }
     const generation = this.committedGeneration;
     const encryptedRevision = this.baseRevision + 1;
     // A retry of the same content against the same base re-sends the very
@@ -366,22 +375,20 @@ export class SyncEngine {
       await this.handleSaveError(error as Error, generation);
       return;
     }
-    this.inFlight = { generation, mutationId, encryptedRevision, document, payload };
-
-    if (this.baseEtag === null) {
-      // No base yet: fetch first so the CAS cannot silently overwrite.
-      await this.refreshRemote({ force: true });
-      if (this.baseEtag === null) {
-        this.callbacks.onState("offline", t("サーバーに接続できません。"));
-        this.scheduleRetry();
-        return;
-      }
+    if (this.baseRevision + 1 !== encryptedRevision || !this.dirty) {
+      // A read moved the base while the payload was being encrypted. What was
+      // built is sealed for a revision that is no longer next: start over
+      // from the base the page holds now, if anything is still unsaved.
+      if (this.dirty) this.scheduleSave();
+      return;
     }
+    this.inFlight = { generation, mutationId, encryptedRevision, document, payload };
 
     this.callbacks.onState("saving");
     this.unconfirmed.add(mutationId);
     this.unconfirmedSends += 1;
     const sentAgainst = this.baseEtag;
+    const knownWhenSent = this.revisions.current();
     try {
       const result = await api.putDocument(
         {
@@ -395,14 +402,31 @@ export class SyncEngine {
         },
         sentAgainst,
       );
+      if (knownWhenSent !== null && encryptedRevision <= knownWhenSent) {
+        // The server accepted a revision this device had already seen
+        // surpassed (another tab opened a newer copy). An honest server
+        // refuses that with 412; accepting it means it went back (§10.4).
+        this.refuseRollback();
+        return;
+      }
+      // This device sealed that revision itself: it is the newest it knows.
+      this.revisions.record(encryptedRevision);
+      this.backoffMs = 1000;
+      if (this.baseEtag !== sentAgainst) {
+        // A read moved the base while this save was in flight. Because the
+        // save succeeded against the old base, the base held now is this very
+        // save or a copy stored after it: keep it. Going back to the answer's
+        // base would make the page forget what it has since applied.
+        this.inFlight = null;
+        if (this.dirty) this.scheduleSave();
+        else this.callbacks.onState("idle");
+        return;
+      }
       this.baseEtag = result.etag;
       this.baseRevision = encryptedRevision;
       this.baseDocument = document;
       this.forceSave = false;
       this.forgetUnconfirmed();
-      // This device sealed that revision itself: it is the newest it knows.
-      this.revisions.record(encryptedRevision);
-      this.backoffMs = 1000;
       // "Still unsynced" needs a change that is really pending: a read may
       // have found the server and the screen equal while this save was in
       // flight, in which case a later generation number alone means nothing.
@@ -564,6 +588,7 @@ export class SyncEngine {
   /** 412 handling (spec §10.4): compare, then either converge or ask. */
   private async resolvePrecondition(): Promise<void> {
     this.inFlight = null;
+    const refusedAgainst = this.baseEtag;
     const knownWhenSent = this.revisions.current();
     let remote: { data?: DocumentResponse; etag?: string; notModified: boolean };
     try {
@@ -603,6 +628,14 @@ export class SyncEngine {
       // A newer copy was processed while this read was in flight: try again
       // from that one.
       this.scheduleRetry();
+      return;
+    }
+    if (this.baseEtag !== refusedAgainst || !this.dirty) {
+      // While this read was in flight an ordinary read already dealt with
+      // the newer copy (moved the base, perhaps found everything saved). The
+      // refusal is settled; whatever is still unsaved goes out from the base
+      // the page holds now.
+      if (this.dirty) this.scheduleSave();
       return;
     }
     // The mutationId is part of the key derivation and of the AAD, so a copy
@@ -652,6 +685,24 @@ export class SyncEngine {
 
     this.callbacks.onState("conflict", t("競合があります。"));
     const decision = await this.callbacks.onConflict({ local, remote: remoteDocument });
+    if (this.baseEtag !== refusedAgainst || !this.dirty) {
+      // The question can stay open for a long time, and reads go on behind
+      // it. One of them has moved the base (for instance by finding the
+      // server and the screen equal): the copy the question was about is no
+      // longer the one to act on. Applying it now would put an outdated
+      // version on screen and move the base backwards.
+      if (decision === "use-remote") {
+        // The user wants the server's copy: take the current one, the usual way.
+        this.dirty = false;
+        this.forceSave = false;
+        void this.drafts.clear();
+        this.callbacks.onState("idle");
+        void this.refreshRemote();
+      } else if (this.dirty) {
+        this.scheduleSave();
+      }
+      return;
+    }
     if (decision === "use-remote") {
       const baseBeforeAnswer = this.baseEtag;
       const revisionBeforeAnswer = this.baseRevision;
@@ -665,9 +716,11 @@ export class SyncEngine {
       // Cleared before the apply, which may itself start a new (repair) save.
       void this.drafts.clear();
       if (!this.callbacks.isSafePoint()) {
-        // A composition is under way: the editor must not be touched now.
-        // Leave the base where it was, so the next poll fetches this same
-        // copy and applies it once the input has settled.
+        // A composition is under way: the editor must not be touched now, so
+        // the choice cannot be carried out. The base goes back to where it
+        // was. When the composition ends the app reports a change (it may
+        // have committed new text), the save is refused again, and the
+        // question is asked again on what is then on screen.
         this.baseEtag = baseBeforeAnswer;
         this.baseRevision = revisionBeforeAnswer;
         this.baseDocument = documentBeforeAnswer;
@@ -706,7 +759,8 @@ export class SyncEngine {
   };
 
   private onOffline = (): void => {
-    this.callbacks.onState("offline");
+    // With nothing unsaved there is nothing "not synced yet" to announce.
+    if (this.dirty) this.callbacks.onState("offline");
   };
 
   private onPageHide = (): void => {

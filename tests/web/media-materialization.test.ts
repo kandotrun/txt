@@ -40,13 +40,14 @@ function harness(players: Player[] = []) {
   const completion = deferred<{ mediaId: string; info: typeof info }>();
   const metadataAck = deferred<boolean>();
   const updates: Record<string, typeof info>[] = [];
+  const composing = { active: false };
   const insertMedia = vi.fn();
   const noteCommittedChange = vi.fn();
   const toast = vi.fn();
   const state = {
     bridge: {}, unlocked: {}, sessionGeneration: 1, documentId: "doc",
     document: { media: { existing: info } as Record<string, typeof info> },
-    editor: { insertMedia, state: { doc: { content: { size: 10 } } } },
+    editor: { insertMedia, isSafePoint: () => !composing.active, state: { doc: { content: { size: 10 } } } },
     sync: { noteCommittedChange }, attaching: new Map(), serviceWorkerReady: true,
   };
   let holdMetadata = false;
@@ -57,6 +58,7 @@ function harness(players: Player[] = []) {
       return holdMetadata && media.uploaded ? metadataAck.promise : Promise.resolve(true);
     } }, mediaReady: Promise.resolve(true), HTMLMediaElement: Player,
     AbortController, DOMException, crypto: { randomUUID: () => "placeholder" },
+    window: { setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms) }, Promise,
     classify: () => "video", renderAttachProgress: vi.fn(), toast,
     uploadFile: (options: { onStarted: (id: string) => void }) => {
       options.onStarted("uploaded");
@@ -70,7 +72,7 @@ function harness(players: Player[] = []) {
     syncServiceWorkerMedia: () => Promise<boolean>;
   } }).integration;
   return {
-    ...integration, state, completion, metadataAck, updates, insertMedia, noteCommittedChange, toast,
+    ...integration, state, completion, metadataAck, updates, insertMedia, noteCommittedChange, toast, composing,
     holdMetadata: () => { holdMetadata = true; },
     cancel: () => {
       const entry = state.attaching.get("placeholder");
@@ -128,6 +130,22 @@ describe("main attachment cancellation and stream materialization", () => {
     expect(h.noteCommittedChange).toHaveBeenCalledOnce();
     expect(h.state.document.media.uploaded).toBe(info);
   });
+  it("spec: an upload that finishes during an IME composition is inserted only once the input has settled", async () => {
+    const h = harness();
+    h.composing.active = true;
+    const pending = h.attachFiles([{}], 2);
+    h.completion.resolve({ mediaId: "uploaded", info });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    // The upload is done and registered, but the document is not touched.
+    expect(h.state.document.media.uploaded).toBe(info);
+    expect(h.insertMedia).not.toHaveBeenCalled();
+    expect(h.noteCommittedChange).not.toHaveBeenCalled();
+    h.composing.active = false;
+    await pending;
+    expect(h.insertMedia).toHaveBeenCalledExactlyOnceWith("uploaded", "video", 2);
+    expect(h.noteCommittedChange).toHaveBeenCalledOnce();
+  });
+
   it("preserves an unchanged playing stream-backed node across unrelated metadata ACKs", async () => {
     const player = new Player("/_local/media/existing");
     const h = harness([player]);

@@ -594,4 +594,103 @@ describe("SyncEngine", () => {
     expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
     h.engine.stop();
   });
+
+  it("spec: a save confirmed late does not move the base back behind a copy applied meanwhile", async () => {
+    // The save of "A" is stored as r6 but its answer takes long. Meanwhile a
+    // read finds server and screen equal (base r6), another device stores r7,
+    // and the next read applies it. The user then changes the text back.
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let releaseFirstAnswer!: () => void;
+    const firstAnswer = new Promise<void>((resolve) => { releaseFirstAnswer = resolve; });
+    let puts = 0;
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts += 1;
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      const answer = { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+      if (puts === 1) await firstAnswer;
+      return answer;
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    const focus = (): void => { for (const handler of h.listeners.get("focus") ?? []) handler(); };
+
+    h.type("A");
+    await vi.advanceTimersByTimeAsync(400); // stored as r6; the answer is still on its way
+    focus(); // read: the server equals the screen, base r6
+    await vi.advanceTimersByTimeAsync(50);
+    server.revision = 7; server.text = "A + phone"; server.mutationId = "foreign"; // another device
+    focus(); // read: applied
+    await vi.advanceTimersByTimeAsync(50);
+    expect(h.applied).toEqual(["A + phone"]);
+
+    h.type("A"); // the user removes what the other device added
+    releaseFirstAnswer(); // the answer to the first save arrives only now
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    // The user's change is saved on top of r7; nothing is applied over it.
+    expect(h.applied).toEqual(["A + phone"]);
+    expect(h.editor.text).toBe("A");
+    expect(server.text).toBe("A");
+    expect(conflicts).toEqual([]);
+    h.engine.stop();
+  });
+
+  it("spec: a refusal already dealt with by an ordinary read does not raise a question against the page's own save", async () => {
+    // One device. A save is stored, its answer lost; the retry is refused and
+    // the engine reads the server copy. Before that read returns, a poll has
+    // already found everything saved; the user then types on.
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    let slowRead: Promise<void> | null = null;
+    let releaseSlowRead!: () => void;
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === undefined && slowRead) await slowRead; // the read made for the 412
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let puts = 0;
+    vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      puts += 1;
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      if (puts === 1) throw new TypeError("Failed to fetch"); // stored, answer lost
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    slowRead = new Promise<void>((resolve) => { releaseSlowRead = resolve; });
+    h.type("first");
+    await vi.advanceTimersByTimeAsync(400); // stored, answer lost
+    await vi.advanceTimersByTimeAsync(2000); // retry: 412, the slow read starts
+    for (const handler of h.listeners.get("focus") ?? []) handler(); // an ordinary read converges
+    await vi.advanceTimersByTimeAsync(50);
+    h.type("first, second"); // the user types on
+    releaseSlowRead(); // the read made for the 412 returns only now
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(conflicts).toEqual([]);
+    expect(server.text).toBe("first, second");
+    h.engine.stop();
+  });
 });

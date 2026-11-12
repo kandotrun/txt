@@ -51,7 +51,18 @@ interface PutResult { etag: string; revision: number; mutationId: string; update
 /** A server with the CAS rules of apps/worker/src/document/store.ts. */
 class Server {
   mutationId = "m0";
-  constructor(public revision: number, public text: string) {}
+  /** Every text the server has held, oldest first. */
+  readonly history: string[];
+  private readonly firstRevision: number;
+  constructor(public revision: number, public text: string) {
+    this.history = [text];
+    this.firstRevision = revision;
+  }
+
+  /** Where the copy stored as `revision` sits in the history. */
+  indexOf(revision: number): number {
+    return revision - this.firstRevision;
+  }
 
   get(known?: string) {
     if (known === etag(this.revision)) return { notModified: true as const };
@@ -77,6 +88,7 @@ class Server {
     this.revision += 1;
     this.text = body.ciphertext.split(":").slice(1).join(":");
     this.mutationId = body.mutationId;
+    this.history.push(this.text);
     return { etag: etag(this.revision), revision: this.revision, mutationId: body.mutationId, updatedAt: 0 };
   }
 
@@ -85,6 +97,7 @@ class Server {
     this.revision += 1;
     this.text = text;
     this.mutationId = `foreign-${this.revision}`;
+    this.history.push(text);
   }
 }
 
@@ -106,6 +119,11 @@ interface SimOptions {
   /** Another device also writes. */
   foreign: boolean;
   decision: "keep-local" | "use-remote" | "random";
+  /**
+   * Some network legs take seconds, so an answer can arrive after later
+   * reads and saves have already been processed.
+   */
+  slow: boolean;
 }
 
 interface SimResult {
@@ -121,8 +139,22 @@ async function simulate(options: SimOptions): Promise<SimResult> {
   const trace: string[] = [];
   const violations: string[] = [];
   const server = new Server(5, "base");
-  /** The newest server version the page's content derives from. */
-  let trueBase = "base";
+  /**
+   * Index, in the server's history, of the newest version the page has taken
+   * in (saved itself, applied, or asked about). Text on screen is "on the
+   * server" when the server held exactly that text at or after this point;
+   * anything else is the user's unsaved work — including text that equals an
+   * OLDER version (the user went back to it), which must be saved again.
+   */
+  let syncedAt = 0;
+  const onServer = (text: string): boolean => server.history.lastIndexOf(text) >= syncedAt;
+  /**
+   * Which server version each decrypted copy is. Looking the text up in the
+   * history instead would pick a LATER version that happens to hold the same
+   * text (the other device typed it again), and so claim the page had taken
+   * in copies it never read.
+   */
+  const versionOf = new WeakMap<DocumentModel, number>();
   let foreignWrites = 0;
   let applyingChosenRemote = false;
   let mode: "ok" | "offline" | "lossy" = "ok";
@@ -136,7 +168,7 @@ async function simulate(options: SimOptions): Promise<SimResult> {
   const offline = (): boolean => mode === "offline";
   const lossy = (): boolean => mode === "lossy";
   const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
-  const latency = (): number => pick(400);
+  const latency = (): number => (options.slow && rand() < 0.3 ? 400 + pick(6000) : pick(400));
 
   vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
     if (offline()) { await delay(pick(30)); throw new TypeError("Failed to fetch"); }
@@ -166,7 +198,7 @@ async function simulate(options: SimOptions): Promise<SimResult> {
     }
     if (stored) {
       integrated.add(server.text);
-      trueBase = server.text;
+      syncedAt = server.history.length - 1;
       trace.push(`  server: stored own r${server.revision} "${server.text}"`);
     } else if (typeof result === "number") {
       trace.push(`  server: PUT ${result} (if-match ${ifMatch.slice(-4)} vs r${server.revision})`);
@@ -207,7 +239,9 @@ async function simulate(options: SimOptions): Promise<SimResult> {
       decryptDocument: async (input: { ciphertext: string; encryptedRevision: number }) => {
         const [sealedAt, ...rest] = input.ciphertext.split(":");
         if (Number(sealedAt) !== input.encryptedRevision) throw new Error("decrypt failed");
-        return docOf(rest.join(":"));
+        const copy = docOf(rest.join(":"));
+        versionOf.set(copy, server.indexOf(input.encryptedRevision));
+        return copy;
       },
       encryptDocument: async (input: { document: DocumentModel; encryptedRevision: number }) => ({
         nonce: "n",
@@ -219,13 +253,13 @@ async function simulate(options: SimOptions): Promise<SimResult> {
       applyRemote: (remote) => {
         const next = textOf(remote);
         if (!editor.safe) violations.push(`IME: remote "${next}" applied during a composition`);
-        if (!applyingChosenRemote && editor.text !== next && editor.text !== trueBase) {
-          violations.push(`OVERWRITE: screen "${editor.text}" silently replaced by "${next}" (true base "${trueBase}")`);
+        if (!applyingChosenRemote && editor.text !== next && !onServer(editor.text)) {
+          violations.push(`OVERWRITE: screen "${editor.text}" silently replaced by "${next}"`);
         }
         trace.push(`  page: applyRemote "${next}" over "${editor.text}"`);
         integrated.add(next);
         editor.text = next;
-        trueBase = next;
+        syncedAt = Math.max(syncedAt, versionOf.get(remote) ?? server.history.lastIndexOf(next));
       },
       onState: (state, detail) => {
         states.push(state);
@@ -246,7 +280,7 @@ async function simulate(options: SimOptions): Promise<SimResult> {
           queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => { applyingChosenRemote = false; })));
         } else {
           // Keeping the local copy makes the remote the version it continues from.
-          trueBase = textOf(remote);
+          syncedAt = Math.max(syncedAt, versionOf.get(remote) ?? server.history.lastIndexOf(textOf(remote)));
         }
         return decision;
       },
@@ -270,8 +304,8 @@ async function simulate(options: SimOptions): Promise<SimResult> {
   };
   const clearDraft = internal.drafts.clear.bind(internal.drafts);
   internal.drafts.clear = () => {
-    if (!applyingChosenRemote && editor.safe && editor.text !== trueBase && editor.text !== server.text) {
-      violations.push(`DRAFT-CLEARED: draft dropped while the screen "${editor.text}" is neither the server copy "${server.text}" nor the true base "${trueBase}"`);
+    if (!applyingChosenRemote && editor.safe && !onServer(editor.text)) {
+      violations.push(`DRAFT-CLEARED: draft dropped while the screen "${editor.text}" is not on the server ("${server.text}")`);
     }
     trace.push("  page: draft cleared");
     return clearDraft();
@@ -280,7 +314,7 @@ async function simulate(options: SimOptions): Promise<SimResult> {
   const checkDraft = (): void => {
     if (!editor.safe || questionOpen) return;
     if (Date.now() - lastEdit < 400) return; // inside the draft's coalescing window
-    if (editor.text === server.text || editor.text === trueBase) return;
+    if (onServer(editor.text)) return;
     if (draftStore.current !== editor.text) {
       violations.push(`DRAFT-MISSING: screen "${editor.text}" is not on the server ("${server.text}") and the stored draft is ${draftStore.current === null ? "absent" : `"${draftStore.current}"`}`);
     }
@@ -337,7 +371,13 @@ async function simulate(options: SimOptions): Promise<SimResult> {
       engine.noteComposingChange();
     } else if (r < 0.46 && options.foreign) {
       foreignWrites += 1;
-      server.foreign(`${server.text}/F${foreignWrites}`);
+      // Mostly its own text; sometimes exactly what this page shows or showed
+      // (the same sentence typed on both devices, a repair save, type-then-
+      // delete), which lets a read find server and screen equal.
+      const same = rand() < 0.3;
+      const text = same ? history[Math.max(0, history.length - 1 - pick(3))]! : `${server.text}/F${foreignWrites}`;
+      server.foreign(text);
+      if (same) integrated.add(text);
       trace.push(`other device: stored r${server.revision} "${server.text}"`);
     } else if (r < 0.54) {
       mode = (["ok", "offline", "lossy"] as const)[pick(3)]!;
@@ -395,23 +435,30 @@ describe("SyncEngine under random interleavings", () => {
   });
 
   it.each([
-    { name: "one device", foreign: false, decision: "keep-local" as const, steps: 30, seeds: 1000 },
-    { name: "another device writing, either answer to a conflict", foreign: true, decision: "random" as const, steps: 30, seeds: 1000 },
-    { name: "another device writing, always taking the server copy, long runs", foreign: true, decision: "use-remote" as const, steps: 60, seeds: 400 },
-  ])("spec: no typed text is lost, overwritten or left unsaved — $name", async ({ foreign, decision, steps, seeds }) => {
+    { name: "one device", foreign: false, decision: "keep-local" as const, slow: false, steps: 30, seeds: 800 },
+    { name: "one device, slow answers", foreign: false, decision: "keep-local" as const, slow: true, steps: 40, seeds: 800 },
+    { name: "another device writing, either answer to a conflict", foreign: true, decision: "random" as const, slow: false, steps: 30, seeds: 800 },
+    { name: "another device writing, slow answers", foreign: true, decision: "keep-local" as const, slow: true, steps: 50, seeds: 1500 },
+    { name: "another device writing, always taking the server copy, long runs", foreign: true, decision: "use-remote" as const, slow: true, steps: 60, seeds: 400 },
+  ])("spec: no typed text is lost, overwritten or left unsaved — $name", async ({ foreign, decision, slow, steps, seeds }) => {
     const failures: string[] = [];
-    for (let seed = 1; seed <= seeds; seed += 1) {
+    // TXT_SIM_SCALE=20 runs twenty times as many seeds, for a deeper look
+    // after changing the engine (a few minutes instead of a few seconds).
+    // TXT_SIM_SEED=1234 replays that one seed (with -t to pick the variant).
+    const only = Number(process.env.TXT_SIM_SEED ?? 0);
+    const total = only > 0 ? only : seeds * Number(process.env.TXT_SIM_SCALE ?? 1);
+    for (let seed = only > 0 ? only : 1; seed <= total; seed += 1) {
       vi.useRealTimers();
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
       vi.useFakeTimers();
       draftStore.current = null;
-      const result = await simulate({ seed, steps, foreign, decision });
+      const result = await simulate({ seed, steps, foreign, decision, slow });
       if (result.violations.length > 0) {
         failures.push(`seed ${seed}: ${result.violations.join(" | ")}\n${result.trace.join("\n")}`);
         if (failures.length >= 3) break; // three traces are enough to work from
       }
     }
     expect(failures.join("\n\n")).toBe("");
-  }, 120_000);
+  }, 3_600_000);
 });

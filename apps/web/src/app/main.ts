@@ -608,9 +608,10 @@ async function attachFiles(files: File[], position: number): Promise<void> {
       });
       controller.signal.throwIfAborted();
       if (generation !== state.sessionGeneration || !state.editor) return;
-      // Register metadata. The insertion itself happens at an IME safe point;
-      // if the surrounding text was deleted meanwhile, the position collapses
-      // to the current selection instead of resurrecting a stale offset (§9.7).
+      // Register metadata. The insertion itself happens at an IME safe point
+      // (below); if the surrounding text was deleted meanwhile, the position
+      // collapses to the current selection instead of resurrecting a stale
+      // offset (§9.7).
       state.document.media[result.mediaId] = result.info;
       entry.mediaId = result.mediaId;
       entry.kind = result.info.kind;
@@ -621,8 +622,18 @@ async function attachFiles(files: File[], position: number): Promise<void> {
       if (mediaInfo(result.mediaId) !== result.info) {
         throw new Error(t("文書が更新されました。添付をやり直してください。"));
       }
-      // Insertion happens here (the upload completed); when composing, the
-      // editor defers the structural change to the next safe point internally.
+      // The upload is complete, but inserting the block replaces part of the
+      // document and moves the caret: it waits for an IME safe point (spec
+      // §9.3). The checks above are repeated afterwards, since a lock, a
+      // cancellation or a remote copy may have arrived meanwhile.
+      while (!state.editor.isSafePoint()) {
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        controller.signal.throwIfAborted();
+        if (generation !== state.sessionGeneration || !state.editor) return;
+      }
+      if (mediaInfo(result.mediaId) !== result.info) {
+        throw new Error(t("文書が更新されました。添付をやり直してください。"));
+      }
       state.editor.insertMedia(result.mediaId, result.info.kind, clampPosition(entry.position));
       state.sync?.noteCommittedChange();
       state.attaching.delete(placeholderId);

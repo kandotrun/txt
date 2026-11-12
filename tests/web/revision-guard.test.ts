@@ -145,4 +145,29 @@ describe("RevisionGuard", () => {
     // Anything that is not a safe integer is treated as no mark at all.
     expect(new RevisionGuard(DOC, memoryStorage({ [`txt.seen.${DOC}`]: "99999999999999999" })).current()).toBeNull();
   });
+
+  it("spec: a raise that was still waiting for the lock does not undo a later explicit reset", async () => {
+    // A lock that is granted only when the test says so.
+    const waiting: Array<() => void> = [];
+    const locks = {
+      request: (_name: string, callback: () => void | Promise<void>) =>
+        new Promise<void>((resolve) => { waiting.push(() => { void callback(); resolve(); }); }),
+    };
+    const storage = memoryStorage();
+    const pageA = new RevisionGuard(DOC, storage, locks);
+    const pageB = new RevisionGuard(DOC, storage, locks);
+    pageA.record(5);
+    waiting.shift()!();
+    pageA.record(10); // queued, not yet granted
+    pageB.reset(3); // the user chose to open the older copy
+    expect(pageB.accepts(3)).toBe(true);
+    for (const grant of waiting.splice(0)) grant(); // the old raise is granted only now
+    await Promise.resolve();
+    expect(storage.data.get(`txt.seen.${DOC}`)).toBe("3");
+    // The page that reset keeps working from the copy it opened.
+    pageB.record(4);
+    for (const grant of waiting.splice(0)) grant();
+    expect(pageB.accepts(5)).toBe(true);
+    expect(storage.data.get(`txt.seen.${DOC}`)).toBe("4");
+  });
 });

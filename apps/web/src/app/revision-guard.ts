@@ -40,6 +40,8 @@ export class RevisionGuard {
   private readonly locks: MarkLocks | null;
   /** Kept in memory too, so a storage failure still protects this page. */
   private seen: number | null;
+  /** How often this page lowered the mark on the user's explicit choice. */
+  private resets = 0;
 
   constructor(documentId: string, storage: MarkStorage | null, locks: MarkLocks | null = null) {
     this.key = `${KEY_PREFIX}${documentId}`;
@@ -78,8 +80,15 @@ export class RevisionGuard {
     const known = this.current();
     if (known !== null && encryptedRevision <= known) return;
     this.seen = encryptedRevision;
+    const storedWhenQueued = this.read();
+    const resetsWhenQueued = this.resets;
     this.exclusively(() => {
+      // The stored mark only falls through reset(). If it fell while this
+      // raise was waiting for the lock — here or in another page — the user
+      // chose an older copy in the meantime, and that choice stands.
+      if (this.resets !== resetsWhenQueued) return;
       const stored = this.read();
+      if (stored !== null && storedWhenQueued !== null && stored < storedWhenQueued) return;
       if (stored === null || encryptedRevision > stored) this.write(encryptedRevision);
     });
   }
@@ -90,6 +99,7 @@ export class RevisionGuard {
    * this page, and it is the one change that is allowed to lower the mark.
    */
   reset(encryptedRevision: number): void {
+    this.resets += 1;
     this.seen = encryptedRevision;
     this.write(encryptedRevision);
   }
