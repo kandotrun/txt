@@ -50,7 +50,9 @@ let allocations: number[];
 
 function message(data: unknown, clientId: string | null = CLIENT, postMessage?: (data: unknown) => void) {
   listeners.get("message")!({
-    data, source: clientId === null ? null : { id: clientId }, ports: postMessage ? [{ postMessage }] : [],
+    data,
+    source: clientId === null ? null : { id: clientId, postMessage: (sent: unknown) => { clientMessages.push({ id: clientId, data: sent }); } },
+    ports: postMessage ? [{ postMessage }] : [],
   });
 }
 function handshake(overrides: Record<string, unknown> = {}, clientId: string | null = CLIENT) {
@@ -649,5 +651,9 @@ describe("hardening: a restarted worker", () => {
     const replies: unknown[] = [];
     message({ type: "txt-media-update", sessionGeneration: 1, media: {} }, CLIENT, (data) => replies.push(data));
     expect(replies).toEqual([{ type: "txt-need-handshake" }]);
+    // The channel reply only ends that one request. The page itself must be
+    // told too: after a restart the first thing it sends may be an update,
+    // and nothing else would start the new handshake.
+    expect(clientMessages).toEqual([{ id: CLIENT, data: { type: "txt-need-handshake" } }]);
   });
 });

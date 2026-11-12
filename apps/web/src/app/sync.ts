@@ -102,8 +102,21 @@ export class SyncEngine {
     generation: number;
     mutationId: string;
     encryptedRevision: number;
+    document: DocumentModel;
     payload: SavePayload;
   } | null = null;
+  /**
+   * The content at the current base: what the server holds as far as this
+   * page knows. Comparing against it tells a real local change from a
+   * "change" that changed nothing (a cancelled composition, Cmd+S).
+   */
+  private baseDocument: DocumentModel;
+  /**
+   * Mutation ids of saves that were sent but never confirmed. If the server
+   * later shows one of them as its current copy, that copy is this page's own
+   * earlier save — its answer was lost — and not somebody else's edit.
+   */
+  private readonly unconfirmed = new Set<string>();
   private debounceTimer: number | null = null;
   private maxWaitTimer: number | null = null;
   private pollTimer: number | null = null;
@@ -118,6 +131,7 @@ export class SyncEngine {
   private readonly revisions: RevisionGuard;
   private rollbackRefused = false;
   private refusedGeneration = -1;
+  private forceSave = false;
 
   constructor(options: {
     bridge: CryptoBridge;
@@ -134,7 +148,18 @@ export class SyncEngine {
   }) {
     this.revisions = options.revisions;
     this.bridge = options.bridge;
-    this.callbacks = options.callbacks;
+    // Once a rolled-back copy has been refused, that is the only thing this
+    // page reports: no later status (a pending "idle" timer, an offline
+    // event, a failing save) may paint over the warning.
+    const report = options.callbacks.onState;
+    this.callbacks = {
+      ...options.callbacks,
+      onState: (state, detail) => {
+        if (this.rollbackRefused) report("decrypt-failed", ROLLBACK_NOTICE());
+        else report(state, detail);
+      },
+    };
+    this.baseDocument = options.callbacks.getDocument();
     this.accountId = options.accountId;
     this.documentId = options.documentId;
     this.keyVersion = options.keyVersion;
@@ -225,8 +250,15 @@ export class SyncEngine {
     }
   }
 
-  /** Marks a committed local change (called from the editor). */
-  noteCommittedChange(): void {
+  /**
+   * Marks a committed local change (called from the editor).
+   *
+   * `force` is for a save that must happen although the visible content is
+   * what the server already has — the repair of a stored document whose
+   * metadata was inconsistent (spec §8).
+   */
+  noteCommittedChange(options: { force?: boolean } = {}): void {
+    if (options.force) this.forceSave = true;
     this.editGeneration += 1;
     this.committedGeneration = this.editGeneration;
     this.dirty = true;
@@ -280,6 +312,15 @@ export class SyncEngine {
     // This exact content was refused for a reason a retry cannot cure (too
     // large, invalid): wait for the next edit instead of sending it again.
     if (this.refusedGeneration === this.committedGeneration) return;
+    if (!this.forceSave && normalizedEqual(this.callbacks.getDocument(), this.baseDocument)) {
+      // "Changed" without a change (a cancelled composition, a save request
+      // on an untouched sheet): there is nothing to send, and treating the
+      // page as dirty would keep a newer remote version from being applied.
+      this.dirty = false;
+      void this.drafts.clear();
+      this.callbacks.onState("idle");
+      return;
+    }
     this.syncing = true;
     try {
       await this.pushOnce();
@@ -292,25 +333,26 @@ export class SyncEngine {
     const generation = this.committedGeneration;
     const encryptedRevision = this.baseRevision + 1;
     // A retry of the same content against the same base re-sends the very
-    // same bytes under the same mutationId, so the server can recognise a
-    // save whose response was lost (spec §10.3). Anything else is a new save.
+    // same bytes under the same mutationId (spec §10.3). Anything else is a
+    // new save. (If the first attempt did reach the server, the retry is
+    // refused with 412 — the base moved to our own save — and
+    // resolvePrecondition recognises that copy as ours.)
     const resend =
       this.inFlight?.generation === generation && this.inFlight.encryptedRevision === encryptedRevision
         ? this.inFlight
         : null;
     const mutationId = resend?.mutationId ?? crypto.randomUUID();
+    const document = resend?.document ?? this.callbacks.getDocument();
     let payload: SavePayload;
     try {
-      payload =
-        resend?.payload ??
-        (await this.buildPayload({ document: this.callbacks.getDocument(), mutationId, encryptedRevision }));
+      payload = resend?.payload ?? (await this.buildPayload({ document, mutationId, encryptedRevision }));
     } catch (error) {
       // A sheet that cannot be sent (invalid, too large) is reported like any
       // other failed save; the text stays in the editor and in the draft.
       await this.handleSaveError(error as Error, generation);
       return;
     }
-    this.inFlight = { generation, mutationId, encryptedRevision, payload };
+    this.inFlight = { generation, mutationId, encryptedRevision, document, payload };
 
     if (this.baseEtag === null) {
       // No base yet: fetch first so the CAS cannot silently overwrite.
@@ -323,6 +365,7 @@ export class SyncEngine {
     }
 
     this.callbacks.onState("saving");
+    this.unconfirmed.add(mutationId);
     try {
       const result = await api.putDocument(
         {
@@ -338,6 +381,9 @@ export class SyncEngine {
       );
       this.baseEtag = result.etag;
       this.baseRevision = result.revision;
+      this.baseDocument = document;
+      this.forceSave = false;
+      this.unconfirmed.clear();
       // This device sealed that revision itself: it is the newest it knows.
       this.revisions.record(encryptedRevision);
       this.backoffMs = 1000;
@@ -402,6 +448,17 @@ export class SyncEngine {
     };
   }
 
+  /**
+   * Content that was refused for a reason a retry cannot cure is not sent
+   * again — but an edit made while that save was in flight is new content,
+   * and its own timers may already have fired while the engine was busy.
+   */
+  private refuse(generation: number, detail: string): void {
+    this.refusedGeneration = generation;
+    this.callbacks.onState("local-only", detail);
+    if (this.committedGeneration !== generation) this.scheduleSave();
+  }
+
   private async handleSaveError(error: Error, generation: number): Promise<void> {
     if (error instanceof ApiRequestError) {
       if (error.status === 401) {
@@ -422,13 +479,11 @@ export class SyncEngine {
       }
       if (error.status === 422) {
         // Reference or integrity violation: keep the input, stop auto-retry.
-        this.refusedGeneration = generation;
-        this.callbacks.onState("local-only", t("参照の整合性が取れないため保存できません。"));
+        this.refuse(generation, t("参照の整合性が取れないため保存できません。"));
         return;
       }
       if (error.status === 413) {
-        this.refusedGeneration = generation;
-        this.callbacks.onState("local-only", TOO_LARGE_NOTICE());
+        this.refuse(generation, TOO_LARGE_NOTICE());
         return; // the same bytes would be refused again
       }
       if (error.status === 429) {
@@ -446,15 +501,13 @@ export class SyncEngine {
     if (error instanceof DocumentTooLargeError) {
       // The input is kept as it is — never truncated — and saving resumes by
       // itself once the sheet is back under the limit (spec §4.6, §9.6).
-      this.refusedGeneration = generation;
-      this.callbacks.onState("local-only", TOO_LARGE_NOTICE());
+      this.refuse(generation, TOO_LARGE_NOTICE());
       return;
     }
     if (error instanceof DocumentFormatError) {
       // Refusing to save keeps the other devices readable; the local copy is
       // preserved and a retry cannot help until the model is repaired.
-      this.refusedGeneration = generation;
-      this.callbacks.onState("local-only", t("本文の整合性が取れないため保存できません。"));
+      this.refuse(generation, t("本文の整合性が取れないため保存できません。"));
       return;
     }
     this.callbacks.onState("offline", t("端末に保存済み・未同期"));
@@ -494,14 +547,22 @@ export class SyncEngine {
       this.scheduleRetry();
       return;
     }
-    const remoteDocument = await this.bridge.decryptDocument({
-      mutationId: remote.data.mutationId,
-      encryptedRevision: remote.data.encryptedRevision,
-      formatVersion: remote.data.formatVersion,
-      keyVersion: remote.data.keyVersion,
-      nonce: remote.data.nonce,
-      ciphertext: remote.data.ciphertext,
-    });
+    let remoteDocument: DocumentModel;
+    try {
+      remoteDocument = await this.bridge.decryptDocument({
+        mutationId: remote.data.mutationId,
+        encryptedRevision: remote.data.encryptedRevision,
+        formatVersion: remote.data.formatVersion,
+        keyVersion: remote.data.keyVersion,
+        nonce: remote.data.nonce,
+        ciphertext: remote.data.ciphertext,
+      });
+    } catch {
+      // The copy that blocks the save cannot be opened. Nothing is changed and
+      // nothing is retried blindly; the text stays here and in the draft.
+      this.callbacks.onState("decrypt-failed", t("内容を開けません。データは変更していません。"));
+      return;
+    }
     const freshness = this.judgeRevision(remote.data.encryptedRevision, knownWhenSent);
     if (freshness === "rollback") {
       this.refuseRollback();
@@ -513,6 +574,10 @@ export class SyncEngine {
       this.scheduleRetry();
       return;
     }
+    // The mutationId is part of the key derivation and of the AAD, so a copy
+    // that decrypted under it really is that mutation.
+    const ownSave = this.unconfirmed.has(remote.data.mutationId);
+    this.unconfirmed.clear();
 
     const local = this.callbacks.getDocument();
     // Equality is decided on the normalized common model, never on ciphertext
@@ -520,9 +585,31 @@ export class SyncEngine {
     if (normalizedEqual(local, remoteDocument)) {
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.revision;
+      this.baseDocument = remoteDocument;
       this.dirty = false;
       void this.drafts.clear();
       this.callbacks.onState("saved");
+      return;
+    }
+    if (ownSave) {
+      // The server's copy is this page's own earlier save, whose answer was
+      // lost; what is on screen simply continues from it. Save on top of it —
+      // there is no other writer to ask the user about.
+      this.baseEtag = remote.etag ?? this.baseEtag;
+      this.baseRevision = remote.data.revision;
+      this.baseDocument = remoteDocument;
+      this.scheduleSave();
+      return;
+    }
+    if (normalizedEqual(local, this.baseDocument)) {
+      // Marked dirty without a real change (a cancelled composition, a save
+      // request): there is nothing of the user's to weigh against the newer
+      // copy, so it is taken like any other remote version — at a safe point,
+      // by the ordinary poll.
+      this.dirty = false;
+      void this.drafts.clear();
+      this.callbacks.onState("idle");
+      void this.refreshRemote();
       return;
     }
 
@@ -531,6 +618,7 @@ export class SyncEngine {
     if (decision === "use-remote") {
       this.baseEtag = remote.etag ?? null;
       this.baseRevision = remote.data.revision;
+      this.baseDocument = remoteDocument;
       this.dirty = false;
       // The local copy was discarded on purpose: it must not be offered back.
       // Cleared before the apply, which may itself start a new (repair) save.
@@ -543,6 +631,7 @@ export class SyncEngine {
       // Keep editing; the next save uses the refreshed base ETag.
       this.baseEtag = remote.etag ?? this.baseEtag;
       this.baseRevision = remote.data.revision;
+      this.baseDocument = remoteDocument;
       this.inFlight = null;
       this.scheduleSave();
     }
@@ -605,8 +694,9 @@ export class SyncEngine {
       if (!this.callbacks.isSafePoint()) return;
     }
     const knownWhenSent = this.revisions.current();
+    const baseWhenSent = this.baseEtag;
     try {
-      const result = await api.document(this.baseEtag ?? undefined);
+      const result = await api.document(baseWhenSent ?? undefined);
       if (this.stopped || result.notModified || !result.data) return;
       const remoteDocument = await this.bridge.decryptDocument({
         mutationId: result.data.mutationId,
@@ -623,12 +713,24 @@ export class SyncEngine {
       }
       // Overtaken by a newer copy while in flight: there is nothing to do.
       if (freshness === "stale") return;
+      // The answer is relative to the base that was sent. If the base has
+      // moved since — this page saved, or another read was applied — this is
+      // at best the copy the page already holds (its own save echoed back),
+      // and applying it would only throw the undo history away.
+      if (this.baseEtag !== baseWhenSent) return;
+      if (this.dirty && normalizedEqual(this.callbacks.getDocument(), this.baseDocument)) {
+        // Marked dirty without a real change (a cancelled composition): the
+        // remote version is applied as if nothing had been touched.
+        this.dirty = false;
+        void this.drafts.clear();
+      }
       if (this.dirty) {
         // Unsaved local edits exist: never replace them silently.
         if (normalizedEqual(this.callbacks.getDocument(), remoteDocument)) {
           // The content already converged: adopt the newer base and stop.
           this.baseEtag = result.etag ?? this.baseEtag;
           this.baseRevision = result.data.revision;
+          this.baseDocument = remoteDocument;
           this.dirty = false;
           void this.drafts.clear();
           this.callbacks.onState("saved");
@@ -648,6 +750,7 @@ export class SyncEngine {
       if (!this.callbacks.isSafePoint()) return;
       this.baseEtag = result.etag ?? this.baseEtag;
       this.baseRevision = result.data.revision;
+      this.baseDocument = remoteDocument;
       this.callbacks.applyRemote(remoteDocument);
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 401) {

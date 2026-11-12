@@ -303,4 +303,153 @@ describe("SyncEngine", () => {
       process.off("unhandledRejection", onRejection);
     }
   });
+
+  it("spec: this page's own save coming back through a poll is not applied as a remote version", async () => {
+    // The read is sent while the save is in flight (so it still names the old
+    // base) and is answered, after the save, with the page's own new copy.
+    let releaseRead!: (value: ReturnType<typeof serverCopy>) => void;
+    const slowRead = new Promise<ReturnType<typeof serverCopy>>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(api, "document").mockReturnValueOnce(slowRead as never).mockResolvedValue(notModified);
+    let releaseSave!: () => void;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    vi.spyOn(api, "putDocument").mockImplementation(async () => {
+      await saveGate;
+      return { etag: etag(6), revision: 6, mutationId: "x", updatedAt: 0 };
+    });
+    const h = start({ revision: 5, text: "v5" });
+    h.type("hello");
+    await vi.advanceTimersByTimeAsync(400); // the save is in flight
+    for (const handler of h.listeners.get("focus") ?? []) handler(); // the read is in flight
+    await vi.advanceTimersByTimeAsync(10);
+    releaseSave();
+    await vi.advanceTimersByTimeAsync(10);
+    releaseRead(serverCopy(6, "hello"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.applied).toEqual([]);
+    h.engine.stop();
+  });
+
+  it("spec: a lost response to this page's own save does not become a conflict with itself", async () => {
+    // The first save reaches the server but its answer is lost; the user keeps
+    // typing. The retry is refused (the base moved to the page's own save).
+    const server = { revision: 5, text: "v5", mutationId: "m" };
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) => {
+      if (known === etag(server.revision)) return notModified;
+      const copy = serverCopy(server.revision, server.text);
+      copy.data.mutationId = server.mutationId;
+      return copy;
+    });
+    let lostOnce = true;
+    const put = vi.spyOn(api, "putDocument").mockImplementation(async (payload, ifMatch) => {
+      const body = payload as { mutationId: string; encryptedRevision: number; ciphertext: string };
+      if (ifMatch !== etag(server.revision)) throw new ApiRequestError(412, "PRECONDITION_FAILED", "stale");
+      server.revision = body.encryptedRevision;
+      server.text = body.ciphertext.split(":").slice(1).join(":");
+      server.mutationId = body.mutationId;
+      if (lostOnce) {
+        lostOnce = false;
+        throw new TypeError("Failed to fetch"); // committed, answer lost
+      }
+      return { etag: etag(server.revision), revision: server.revision, mutationId: body.mutationId, updatedAt: 0 };
+    });
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.type("first sentence");
+    await vi.advanceTimersByTimeAsync(400);
+    h.type("first sentence, second sentence");
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(conflicts).toEqual([]);
+    expect(server.text).toBe("first sentence, second sentence");
+    expect(put.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
+    h.engine.stop();
+  });
+
+  it("spec: the rollback warning is not replaced by a later status", async () => {
+    const get = vi.spyOn(api, "document").mockResolvedValue(notModified);
+    vi.spyOn(api, "putDocument").mockResolvedValue({ etag: etag(11), revision: 11, mutationId: "x", updatedAt: 0 });
+    const h = start({ revision: 10, text: "v10" });
+    h.type("v11");
+    await vi.advanceTimersByTimeAsync(500); // saved; the "idle" timer is pending
+    get.mockResolvedValue(serverCopy(12, "old", 3));
+    for (const handler of h.listeners.get("focus") ?? []) handler();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    await vi.advanceTimersByTimeAsync(5000); // the pending "idle" timer fires
+    for (const handler of h.listeners.get("offline") ?? []) handler();
+    expect(h.states.at(-1)).toContain("以前の版に戻されています");
+    h.engine.stop();
+  });
+
+  it("spec: an edit made while a save was being refused is still sent", async () => {
+    vi.spyOn(api, "document").mockResolvedValue(notModified);
+    let rejectFirst!: (reason: unknown) => void;
+    const firstSave = new Promise<never>((_resolve, reject) => { rejectFirst = reject; });
+    const put = vi.spyOn(api, "putDocument")
+      .mockReturnValueOnce(firstSave as never)
+      .mockResolvedValue({ etag: etag(6), revision: 6, mutationId: "x", updatedAt: 0 });
+    const h = start({ revision: 5, text: "v5" });
+    h.type("refused content");
+    await vi.advanceTimersByTimeAsync(400); // first save in flight
+    h.type("corrected content");
+    await vi.advanceTimersByTimeAsync(5000); // its timers fire while the first is pending
+    rejectFirst(new ApiRequestError(422, "UNPROCESSABLE", "bad reference"));
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(put).toHaveBeenCalledTimes(2);
+    expect(h.states.at(-1)).toMatch(/^(saved|idle)$/);
+    h.engine.stop();
+  });
+
+  it("spec: a composition that changes nothing lets the deferred remote version apply, with no conflict", async () => {
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) =>
+      known === etag(6) ? notModified : serverCopy(6, "from another device"));
+    const put = vi.spyOn(api, "putDocument");
+    const conflicts: string[] = [];
+    const h = start({ revision: 5, text: "v5" });
+    (h.engine as unknown as { callbacks: { onConflict: () => Promise<string> } }).callbacks.onConflict = async () => {
+      conflicts.push("asked");
+      return "keep-local";
+    };
+    h.editor.safe = false;
+    h.engine.noteComposingChange();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(h.applied).toEqual([]);
+    // The composition is cancelled: the app reports a committed change even
+    // though the text is what it was.
+    h.editor.safe = true;
+    h.engine.noteCommittedChange();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(conflicts).toEqual([]);
+    expect(put).not.toHaveBeenCalled();
+    expect(h.applied).toEqual(["from another device"]);
+    h.engine.stop();
+  });
+
+  it("spec: a refused save whose remote copy cannot be opened is reported, not left hanging", async () => {
+    // 412, then a copy whose ciphertext does not open under the revision it
+    // claims (tampered or corrupted): decryption fails.
+    const unreadable = serverCopy(9, "garbled");
+    unreadable.data.ciphertext = "1:garbled";
+    vi.spyOn(api, "document").mockImplementation(async (known?: string) =>
+      known === undefined ? unreadable : notModified);
+    vi.spyOn(api, "putDocument").mockRejectedValue(new ApiRequestError(412, "PRECONDITION_FAILED", "stale"));
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => { rejections.push(reason); };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const h = start({ revision: 5, text: "v5" });
+      h.type("text");
+      await vi.advanceTimersByTimeAsync(2000);
+      await new Promise<void>((resolve) => { vi.useRealTimers(); setTimeout(resolve, 20); });
+      expect(rejections).toEqual([]);
+      expect(h.states.at(-1)).toContain("内容を開けません");
+      h.engine.stop();
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
 });

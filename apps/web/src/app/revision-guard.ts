@@ -32,11 +32,18 @@ export class RevisionGuard {
   constructor(documentId: string, storage: MarkStorage | null) {
     this.key = `${KEY_PREFIX}${documentId}`;
     this.storage = storage;
-    this.seen = this.read();
+    this.seen = null;
+    this.current();
   }
 
-  /** The newest revision this device has opened, or null if none. */
+  /**
+   * The newest revision this device has opened, or null if none. Other pages
+   * of the same document share the stored mark, so it is read every time:
+   * the answer is the newest copy any of them has opened.
+   */
   current(): number | null {
+    const stored = this.read();
+    if (stored !== null && (this.seen === null || stored > this.seen)) this.seen = stored;
     return this.seen;
   }
 
@@ -46,13 +53,17 @@ export class RevisionGuard {
    * tell a rollback (older than what was known then) from a response that
    * merely arrived after a newer one (older only than what is known now).
    */
-  accepts(encryptedRevision: number, floor: number | null = this.seen): boolean {
+  accepts(encryptedRevision: number, floor: number | null = this.current()): boolean {
     return floor === null || encryptedRevision >= floor;
   }
 
-  /** Remembers `encryptedRevision` if it is newer than the current mark. */
+  /**
+   * Remembers `encryptedRevision` if it is newer than the device's mark. A
+   * page that is behind another one never lowers it.
+   */
   record(encryptedRevision: number): void {
-    if (this.seen !== null && encryptedRevision <= this.seen) return;
+    const known = this.current();
+    if (known !== null && encryptedRevision <= known) return;
     this.write(encryptedRevision);
   }
 

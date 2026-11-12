@@ -9,7 +9,7 @@
 import { pruneUnreferencedMedia, serializeDocument } from "../../../../packages/protocol/src/document.ts";
 import type { DocumentModel, MediaInfo } from "../../../../packages/protocol/src/document.ts";
 import { api, ApiRequestError } from "./api.ts";
-import type { CredentialSummary, SessionSummary } from "./api.ts";
+import type { CredentialSummary, DocumentResponse, SessionSummary } from "./api.ts";
 import { CryptoBridge } from "./crypto-bridge.ts";
 import { debugHookAllowed } from "./debug-hook.ts";
 import { clearAccountDrafts, clearDraft, loadDraft } from "./drafts.ts";
@@ -718,6 +718,15 @@ function markStorage(): Storage | null {
   }
 }
 
+type LoadedDocument = { data: DocumentResponse; etag?: string };
+
+/** An unconditional read of the stored copy (no validator, so never a 304). */
+async function readDocument(): Promise<LoadedDocument> {
+  const loaded = await api.document();
+  if (!loaded.data) throw new Error(t("文書を取得できません。"));
+  return { data: loaded.data, etag: loaded.etag };
+}
+
 async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Promise<void> {
   state.sessionGeneration += 1;
   const generation = state.sessionGeneration;
@@ -737,9 +746,8 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     // The document payload carries the real documentId; load it before unlocking
     // the workers so the AAD matches. This must be an unconditional fetch: a
     // 304 from a stale validator would leave us without a payload to decrypt.
-    const first = await api.document();
+    let first = await readDocument();
     if (generation !== state.sessionGeneration) { bridge.lock(); return; }
-    if (!first.data) throw new Error(t("文書を取得できません。"));
     state.documentId = first.data.documentId;
     if (window.__txtDebug) window.__txtDebug.step = "session:document-done";
 
@@ -771,14 +779,15 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     }
 
     if (generation !== state.sessionGeneration) { bridge.lock(); return; }
-    const document = await bridge.decryptDocument({
-      mutationId: first.data.mutationId,
-      encryptedRevision: first.data.encryptedRevision,
-      formatVersion: first.data.formatVersion,
-      keyVersion: first.data.keyVersion,
-      nonce: first.data.nonce,
-      ciphertext: first.data.ciphertext,
+    const open = (copy: LoadedDocument): Promise<DocumentModel> => bridge.decryptDocument({
+      mutationId: copy.data.mutationId,
+      encryptedRevision: copy.data.encryptedRevision,
+      formatVersion: copy.data.formatVersion,
+      keyVersion: copy.data.keyVersion,
+      nonce: copy.data.nonce,
+      ciphertext: copy.data.ciphertext,
     });
+    let document = await open(first);
     if (window.__txtDebug) window.__txtDebug.step = "session:decrypted";
 
     // Rollback detection (spec §10.4). The copy has just been decrypted, so
@@ -787,7 +796,17 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     const revisions = new RevisionGuard(first.data.documentId, markStorage());
     if (acceptOlderCopy) revisions.reset(first.data.encryptedRevision);
     if (!revisions.accepts(first.data.encryptedRevision)) {
-      throw new RollbackError(t("サーバーの内容が、この端末で以前に開いた版より古くなっています"));
+      // Another tab of this browser may have saved while that read was in
+      // flight, raising the device's mark past it. Read once more before
+      // concluding that the server went backwards.
+      const again = await readDocument();
+      const reopened = again.data.documentId === first.data.documentId ? await open(again) : null;
+      if (generation !== state.sessionGeneration) { bridge.lock(); return; }
+      if (!reopened || !revisions.accepts(again.data.encryptedRevision)) {
+        throw new RollbackError(t("サーバーの内容が、この端末で以前に開いた版より古くなっています"));
+      }
+      first = again;
+      document = reopened;
     }
     revisions.record(first.data.encryptedRevision);
     sessionRevisions = revisions;
@@ -876,7 +895,7 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
         // them dropped; persist the repaired model so the stored document stops
         // being broken for every other client (spec §8).
         if (bridge.lastDroppedMediaIds.length > 0) {
-          sync.noteCommittedChange();
+          sync.noteCommittedChange({ force: true });
         }
       },
       onState: (nextState, detail) => {
@@ -928,7 +947,6 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
     revisions: sessionRevisions,
   });
   state.sync = sync;
-  sync.start();
 
   // Local draft recovery (§9.6, §10.6): a draft is only meaningful when it
   // holds input the server does not have yet. Committed snapshots are dropped
@@ -1009,10 +1027,14 @@ async function startSession(vault: UnlockedVault, acceptOlderCopy = false): Prom
   // still waiting for an answer; an adopted draft is already being saved.
   if (bridge.lastDroppedMediaIds.length > 0 && !draftAdopted) {
     toast(t("添付情報の整合性を修復しました。"), 4000);
-    sync.noteCommittedChange();
+    sync.noteCommittedChange({ force: true });
   }
 
   if (generation !== state.sessionGeneration) return;
+  // Polling starts only now. While the draft question is open the editor
+  // still shows the server copy: a rollback detected then would store that
+  // copy as "the draft", over the unsynced text the question is about.
+  sync.start();
   showApp();
   if (!draftAdopted && bridge.lastDroppedMediaIds.length === 0) setSyncState("idle");
   editor.focus();

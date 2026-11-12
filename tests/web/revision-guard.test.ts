@@ -74,4 +74,20 @@ describe("RevisionGuard", () => {
     expect.soft(new RevisionGuard(DOC, null).accepts(0)).toBe(true);
     expect(new RevisionGuard(DOC, memoryStorage({ [`txt.seen.${DOC}`]: "1:9" })).accepts(0)).toBe(true);
   });
+
+  it("spec: a page that is behind cannot lower the mark another page raised", () => {
+    const storage = memoryStorage();
+    const pageA = new RevisionGuard(DOC, storage);
+    const pageB = new RevisionGuard(DOC, storage);
+    pageA.record(5);
+    pageB.record(5);
+    pageA.record(10); // this tab saved several times
+    pageB.record(6); // the other tab finally processes an older answer
+    expect.soft(storage.data.get(`txt.seen.${DOC}`)).toBe("10");
+    // Every page of the device, and any page opened later, judges by the
+    // newest copy the device has opened.
+    expect.soft(pageB.current()).toBe(10);
+    expect.soft(pageB.accepts(8)).toBe(false);
+    expect(new RevisionGuard(DOC, storage).accepts(8)).toBe(false);
+  });
 });

@@ -757,3 +757,59 @@ test("spec: Service Workerが再起動して鍵を失っても、再読み込み
   });
   expect(loaded).toBe(true);
 });
+
+test("spec: Service Worker再起動後の最初の操作が添付の追加でも、メディアが再び読める", async ({ page }) => {
+  await installVirtualAuthenticator(page, { hasPrf: true });
+  await page.goto(BASE);
+  await registerViaOnboarding(page);
+  await expect(page.locator("#app")).toBeVisible({ timeout: 30000 });
+  await page.locator("#editor-host .ProseMirror").click();
+  await page.locator("#file-input").setInputFiles({ name: "a.wav", mimeType: "audio/wav", buffer: silentWav() });
+  await expect(page.locator("#editor-host audio")).toHaveCount(1, { timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1200);
+  await waitForSync(page);
+
+  const client = await page.context().newCDPSession(page);
+  await client.send("ServiceWorker.enable");
+  await client.send("ServiceWorker.stopAllWorkers");
+  await page.waitForTimeout(500);
+
+  // The first thing the restarted worker hears from the page is a media
+  // update (a second attachment), not a media request.
+  await page.locator("#file-input").setInputFiles({ name: "b.wav", mimeType: "audio/wav", buffer: silentWav(10) });
+  await expect(page.locator("#editor-host audio")).toHaveCount(2, { timeout: 45000 });
+  await waitForSync(page);
+  await page.waitForTimeout(1500);
+  await waitForSync(page);
+
+  // Both players have a source again and the first one loads, with no reload.
+  await page.waitForFunction(
+    () => [...document.querySelectorAll("#editor-host audio")].every((node) => node.getAttribute("src")),
+    undefined,
+    { timeout: 30000 },
+  );
+  const loaded = await page.evaluate(async () => {
+    const audio = document.querySelector("#editor-host audio") as HTMLAudioElement;
+    for (let round = 0; round < 6; round += 1) {
+      const ok = await new Promise<boolean>((resolve) => {
+        const finish = (value: boolean): void => {
+          audio.removeEventListener("loadedmetadata", onLoaded);
+          audio.removeEventListener("error", onError);
+          resolve(value);
+        };
+        const onLoaded = (): void => finish(true);
+        const onError = (): void => finish(false);
+        audio.addEventListener("loadedmetadata", onLoaded);
+        audio.addEventListener("error", onError);
+        audio.preload = "auto";
+        audio.load();
+        window.setTimeout(() => finish(audio.readyState >= 1), 4000);
+      });
+      if (ok) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    return false;
+  });
+  expect(loaded).toBe(true);
+});

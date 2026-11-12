@@ -117,9 +117,12 @@ self.addEventListener("message", (event) => {
   const session = sessions.get(clientId);
   if (data?.type === "txt-media-update") {
     if (!session) {
-      // Restarted since the handshake (see NEED_HANDSHAKE): say so on the
-      // same channel, so the page does not wait for an acknowledgement.
+      // Restarted since the handshake (see NEED_HANDSHAKE). The reply on the
+      // channel ends this one request without a timeout; the message to the
+      // client is what makes the page start a new handshake — after a
+      // restart its first message may well be an update, not a media request.
       event.ports[0]?.postMessage(NEED_HANDSHAKE);
+      (event.source as Client).postMessage(NEED_HANDSHAKE);
       return;
     }
     if (session.ownerClientId !== clientId) return;

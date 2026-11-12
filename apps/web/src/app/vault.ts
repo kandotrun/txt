@@ -249,15 +249,20 @@ export async function recoverWithKey(
   confirmNewKey: (newRecoveryKeyText: string) => Promise<boolean>,
 ): Promise<RecoveryOutcome> {
   const parsed = await parseRecoveryKey(recoveryKeyText);
-  const recoveryAuth = toBase64Url(await deriveRecoveryAuth(parsed.seed, parsed.accountId));
-  await api.recoveryStart(parsed.accountId, recoveryAuth);
+  // Kept until the recovery is committed or abandoned: restarting a lapsed
+  // recovery session needs it again (spec §7.2). Wiped in the `finally`.
+  const recoveryAuth = await deriveRecoveryAuth(parsed.seed, parsed.accountId);
+  let vaultKey: Uint8Array | null = null;
+  let committed = false;
+  try {
+  await api.recoveryStart(parsed.accountId, toBase64Url(recoveryAuth));
 
   const keys = await api.keys();
   const recovery = keys.recovery;
   if (!recovery) throw new Error(t("復旧情報が見つかりません。"));
   const recoveryKek = await deriveRecoveryKek(parsed.seed, parsed.accountId);
   const aad = recoveryAad(parsed.accountId, recovery.recoveryVersion, recovery.keyVersion);
-  const vaultKey = await unwrapVaultKey(
+  vaultKey = await unwrapVaultKey(
     recoveryKek,
     fromBase64Url(recovery.nonce),
     fromBase64Url(recovery.wrappedKey),
@@ -288,7 +293,7 @@ export async function recoverWithKey(
   };
 
   if (!(await confirmNewKey(newRecoveryKeyText))) {
-    wipe(vaultKey, created.prfOutput);
+    wipe(created.prfOutput);
     throw new Error(
       t("新しい復旧キーの保存を確認できなかったため、復旧を完了していません。今までの復旧キーは引き続き使えます。"),
     );
@@ -319,12 +324,18 @@ export async function recoverWithKey(
       const sessionLapsed = error instanceof ApiRequestError && error.status === 401;
       const ceremonyLapsed = error instanceof ApiRequestError && error.code === "CHALLENGE_EXPIRED";
       if (attempt > 0 || !(sessionLapsed || ceremonyLapsed)) throw error;
-      if (sessionLapsed) await api.recoveryStart(parsed.accountId, recoveryAuth);
+      if (sessionLapsed) await api.recoveryStart(parsed.accountId, toBase64Url(recoveryAuth));
       created = await createCredential((await api.recoveryOptions()).options);
     }
   }
 
+  committed = true;
   return { vaultKey, accountId: parsed.accountId };
+  } finally {
+    wipe(recoveryAuth);
+    // The VaultKey leaves this function only with a committed recovery.
+    if (!committed) wipe(vaultKey);
+  }
 }
 
 /** Reads the account's userHandle from /session (owner-only field). */
