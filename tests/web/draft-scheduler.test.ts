@@ -144,6 +144,21 @@ describe("DraftScheduler", () => {
     expect(written).toEqual(["kept"]);
   });
 
+  it("spec: a flush with nothing to write does not stop later writes or clears", async () => {
+    const log: string[] = [];
+    const scheduler = new DraftScheduler({
+      delayMs: 200,
+      capture: () => async () => { log.push("write"); },
+      clear: async () => { log.push("clear"); },
+    });
+    // A clean page going to the background flushes with nothing pending.
+    await scheduler.flush();
+    scheduler.noteChange();
+    await scheduler.flush();
+    await scheduler.clear();
+    expect(log).toEqual(["write", "clear"]);
+  });
+
   it("spec: a failed write does not stop later writes", async () => {
     const written: string[] = [];
     let fail = true;

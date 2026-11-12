@@ -83,7 +83,12 @@ export class DraftScheduler {
   }
 
   private drain(): Promise<void> {
-    this.draining ??= (async () => {
+    if (this.draining) return this.draining;
+    if (!this.pending) return Promise.resolve();
+    // The loop starts on a later microtask, after `draining` is assigned, so
+    // its cleanup can never run before the assignment and leave a finished
+    // promise behind for later callers to wait on.
+    const run = Promise.resolve().then(async () => {
       try {
         while (this.pending) {
           const job = this.pending;
@@ -95,7 +100,8 @@ export class DraftScheduler {
       } finally {
         this.draining = null;
       }
-    })();
-    return this.draining;
+    });
+    this.draining = run;
+    return run;
   }
 }
