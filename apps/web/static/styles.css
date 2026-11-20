@@ -2,8 +2,9 @@
  *
  * "活字" (type): white page, ink-black type, one accent colour. The editing
  * surface is a centred column of readable measure on the bare page — no card,
- * no paper shadow, no fake Apple window chrome. Body text uses a system
- * monospace stack with a Japanese fallback, base 16 CSS px, line-height 1.6.
+ * no paper shadow, no fake Apple window chrome. Text prioritises Hiragino
+ * sans-serif; the editor uses 26 CSS px, line-height 1.8 and 0.02em tracking.
+ * UI text stays at its existing size; the wordmark keeps its monospace face.
  *
  * Motion rule (spec §4.2): animations live only on layers outside the editing
  * surface (gate, intro, dialog, toast, hints). Nothing inside or wrapping
@@ -86,8 +87,8 @@ body {
 }
 
 body {
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Yu Gothic",
-    "Hiragino Kaku Gothic ProN", Meiryo, monospace;
+  font-family: "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic Medium",
+    "Yu Gothic", Meiryo, system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.6;
   -webkit-text-size-adjust: 100%;
@@ -235,8 +236,18 @@ body {
   flex-direction: column;
 }
 
+.editor .ProseMirror,
+.empty-hint {
+  font-size: 1.625rem;
+  line-height: 1.8;
+  letter-spacing: 0.02em;
+  line-break: strict;
+}
+
 .editor {
-  flex: 1;
+  /* A definite basis lets the surface's 100% min-height cover the empty hint
+     even when the hint wraps onto a second line. */
+  flex: 1 1 0px;
   padding: 24px var(--column-inline) 0;
   /* Trailing space so the last line is never hidden behind the footer or the
      software keyboard (spec §4.2). */
@@ -578,6 +589,7 @@ body {
   align-items: baseline;
   margin: 0 0 12px;
   color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: clamp(76px, 24vw, 132px);
   font-weight: 800;
   line-height: 0.9;
