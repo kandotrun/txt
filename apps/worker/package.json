@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@simplewebauthn/server": "^14.0.2",
-    "hono": "^4.13.14"
+    "@simplewebauthn/server": "^14.1.0",
+    "hono": "^4.13.17"
   }
 }
