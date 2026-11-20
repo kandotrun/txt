@@ -226,4 +226,21 @@ test("centres a readable text column on wide screens", async ({ page }) => {
   const narrow = await measure();
   expect(narrow.left).toBe(16);
   expect(narrow.viewport - narrow.right).toBe(16);
+
+  // The larger empty hint wraps on phones. Its second line must still land
+  // inside the editable surface so a tap starts writing.
+  const hint = page.locator("#empty-hint");
+  await expect(hint).toBeVisible();
+  const target = await hint.evaluate((node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const line = range.getClientRects()[1]!;
+    return { x: line.left + line.width / 2, y: line.top + line.height / 2 };
+  });
+  await surface.evaluate((node: HTMLElement) => node.blur());
+  await page.mouse.click(target.x, target.y);
+  await expect(surface).toBeFocused();
+  await page.keyboard.insertText("案内から書き始める");
+  await expect(surface).toContainText("案内から書き始める");
+  await expect(hint).toBeHidden();
 });
