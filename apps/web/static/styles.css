@@ -3,7 +3,7 @@
  * "活字" (type): white page, ink-black type, one accent colour. The editing
  * surface is a centred column of readable measure on the bare page — no card,
  * no paper shadow, no fake Apple window chrome. Text prioritises Hiragino
- * sans-serif; the editor uses 26 CSS px, line-height 1.8 and 0.02em tracking.
+ * sans-serif; the editor uses 16 CSS px, line-height 1.8 and 0.02em tracking.
  * UI text stays at its existing size; the wordmark keeps its monospace face.
  *
  * Motion rule (spec §4.2): animations live only on layers outside the editing
@@ -238,7 +238,6 @@ body {
 
 .editor .ProseMirror,
 .empty-hint {
-  font-size: 1.625rem;
   line-height: 1.8;
   letter-spacing: 0.02em;
   line-break: strict;
