@@ -227,14 +227,15 @@ test("centres a readable text column on wide screens", async ({ page }) => {
   expect(narrow.left).toBe(16);
   expect(narrow.viewport - narrow.right).toBe(16);
 
-  // The larger empty hint wraps on phones. Its second line must still land
-  // inside the editable surface so a tap starts writing.
+  // Tapping the last line of the empty hint must start writing, whether the
+  // hint fits on one line or wraps on a phone.
   const hint = page.locator("#empty-hint");
   await expect(hint).toBeVisible();
   const target = await hint.evaluate((node) => {
     const range = document.createRange();
     range.selectNodeContents(node);
-    const line = range.getClientRects()[1]!;
+    const lines = range.getClientRects();
+    const line = lines[lines.length - 1]!;
     return { x: line.left + line.width / 2, y: line.top + line.height / 2 };
   });
   await surface.evaluate((node: HTMLElement) => node.blur());
